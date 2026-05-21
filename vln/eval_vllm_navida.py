@@ -84,14 +84,21 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
 
     num_episodes = len(env.episodes)
     done_result_keys = load_done_result_keys(result_path)
-    
+    # Snapshot episodes so pass_k trials can stay on the same target episode
+    # rather than advancing through the dataset iterator.
+    episodes_snapshot = list(env.episodes)
+
     EARLY_STOP_ROTATION = 25
     EARLY_STOP_STEPS = 400
 
-    for _ in range(num_episodes):
+    for target_ep in episodes_snapshot:
         for trial_id in range(pass_k):
             episode_start_time = time.time()
 
+            # Pin this trial to target_ep. The current_episode setter sets
+            # _episode_from_iter_on_reset=False, so reset() reuses target_ep
+            # instead of pulling the next item from episode_iterator.
+            env.current_episode = target_ep
             obs = env.reset()
             iter_step = 0
             agent.reset()
