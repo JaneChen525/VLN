@@ -17,7 +17,7 @@ from habitat.config.default_structured_configs import (
 )
 from tqdm import tqdm
 
-from vln.habitat_extensions import measures, task  # noqa: F401  (registers extensions)
+from habitat_extensions import measures, task  # noqa: F401  (registers extensions; requires vln/ on PYTHONPATH)
 from vln.rl.rollout import HabitatRolloutAgent, run_episode, trajectory_to_rows
 
 
