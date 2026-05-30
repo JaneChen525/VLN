@@ -138,6 +138,11 @@ def worker_loop(
                 })
                 continue
 
+            if op == "episodes":
+                limit = int(cmd.get("limit", 100))
+                resp_queue.put({"ok": True, "episode_ids": list(episodes_by_id.keys())[:limit]})
+                continue
+
             if op == "private":
                 if current_episode is None:
                     resp_queue.put({"ok": False, "error": "no active episode"})

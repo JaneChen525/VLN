@@ -49,14 +49,15 @@ def build_messages(instruction: str, rgb_history: list, k_history: int = 8) -> l
     ]
 
 
-def parse_actions(output_text: str, forward_distance: int = 25, turn_angle: int = 15):
-    # Return list[(action_id, numeric)] for the first up to 2 sub-actions.
-    # action_id: 0=stop, 1=forward, 2=turn left, 3=turn right
+def parse_actions(output_text: str, forward_distance: int = 25, turn_angle: int = 15, n: int = 2):
+    # Return list[(action_id, numeric)] for the first up to n sub-actions.
+    # action_id: 0=stop, 1=forward, 2=turn left, 3=turn right.
+    # n=2 mirrors NaVIDA baseline + m1/m4 variants (select_action_idx=2 / [:2]).
     match = re.search(r"<answer>(.*?)</answer>", output_text)
     body = match.group(1).strip() if match else output_text.strip()
     sub_actions = body.split(", ")
     results = []
-    for sa in sub_actions[:2]:
+    for sa in sub_actions[:n]:
         results.append(_parse_one(sa, forward_distance, turn_angle))
     return results
 
