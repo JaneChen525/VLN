@@ -69,10 +69,23 @@ PYTHONPATH=/var/data0/sandbox/janec/WorldModel:/var/data0/sandbox/janec/WorldMod
 3. `rollout_sampling_config_hash` will change automatically — trainer-side
    group filtering keeps variants from cross-contaminating GRPO groups.
 
+## Concurrency
+
+`--concurrency N` runs up to N episodes in parallel via `asyncio.Semaphore` +
+`gather`. Set N ≤ env_server `--pool-size`. Each trajectory gets an independent
+`random.Random(trajectory_seed(seed, episode_id, trial_id))` so fallback-action
+randomness does not depend on coroutine interleaving.
+
+Profiled on env1 (pool=4, vLLM TP=2, 16 traj): c=1 268s → c=4 110s = 2.43×.
+Bottleneck is the single vLLM instance (env time is ~9% of serial cost); the
+profile fields `sum_vllm_s` / `sum_env_s` in the run summary make this explicit.
+
+Note: cross-concurrency runs are NOT bit-reproducible even at temperature=0 —
+vLLM continuous-batching numerics flip greedy argmax with batch composition.
+This is inherent to vLLM and irrelevant for RL (rollouts sample at T>0).
+
 ## Known limitations
 
-- Episodes run serially. asyncio plumbing exists but pool=1 means no parallel
-  speedup until env_server `--pool-size > 1` (7.3c).
 - vLLM `logprobs` / `token_ids` not yet captured. Add when wiring 7.3d trainer
   collator.
 - Action parser is shared with 7.2 / NaVIDA upstream (`vln.rl.messages.parse_actions`).
