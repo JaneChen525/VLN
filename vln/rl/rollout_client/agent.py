@@ -1,7 +1,7 @@
 import hashlib
 import random
+import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import httpx
 
@@ -23,11 +23,13 @@ class TurnRecord:
 
 @dataclass
 class AgentState:
+    rng: random.Random = field(default_factory=random.Random)  # per-trajectory, deterministic under concurrency
     jpeg_b64_buffer: list[str] = field(default_factory=list)
     pending_actions: list[int] = field(default_factory=list)
     turns: list[TurnRecord] = field(default_factory=list)
     turn_idx: int = 0
     parse_fail_count: int = 0
+    vllm_s: float = 0.0  # cumulative time waiting on vLLM
 
 
 def _build_messages(jpeg_b64_list: list[str], current_jpeg_b64: str, instruction: str) -> tuple[list, str]:
@@ -67,16 +69,16 @@ class AsyncRolloutAgent:
         model_name: str,
         cfg: RolloutConfig,
         selector: FrameSelector,
-        rng: Optional[random.Random] = None,
     ):
         self.vllm = vllm_client
         self.model = model_name
         self.cfg = cfg
         self.selector = selector
-        self.rng = rng or random.Random()
 
-    def new_state(self) -> AgentState:
-        return AgentState()
+    def new_state(self, seed: int) -> AgentState:
+        # Per-trajectory rng so concurrent episodes are reproducible regardless
+        # of completion order (random fallback actions consume rng).
+        return AgentState(rng=random.Random(seed))
 
     async def _generate(self, messages: list) -> str:
         body = {
@@ -102,7 +104,9 @@ class AsyncRolloutAgent:
         current_idx = len(state.jpeg_b64_buffer) - 1
 
         messages, rendered = _build_messages(history_b64, current_b64, public_obs["instruction"])
+        _t = time.perf_counter()
         response = await self._generate(messages)
+        state.vllm_s += time.perf_counter() - _t
         parsed = parse_actions(
             response,
             self.cfg.forward_distance,
@@ -134,12 +138,12 @@ class AsyncRolloutAgent:
         atoms: list[int] = []
         for action_id, numeric in parsed:
             if action_id is None:
-                action_id = self.rng.randint(1, 3)
+                action_id = state.rng.randint(1, 3)
                 numeric = self.cfg.forward_distance if action_id == 1 else self.cfg.turn_angle
             atoms.extend(
                 expand_to_atomic(action_id, numeric, self.cfg.forward_distance, self.cfg.turn_angle)
             )
         if not atoms:
-            atoms.append(self.rng.randint(1, 3))
+            atoms.append(state.rng.randint(1, 3))
         state.pending_actions.extend(atoms)
         return state.pending_actions.pop(0)

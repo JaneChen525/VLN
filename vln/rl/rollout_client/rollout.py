@@ -25,8 +25,16 @@ class TrajectoryRecord:
     ne: float = 0.0
     env_steps: int = 0
     duration_s: float = 0.0
+    vllm_s: float = 0.0
+    env_s: float = 0.0
     done_reason: str = ""
     aborted: bool = False
+
+
+def trajectory_seed(base_seed: int, episode_id: str, trial_id: int) -> int:
+    # Deterministic per-trajectory seed, independent of concurrent completion order.
+    h = int(hashlib.sha256(f"{base_seed}:{episode_id}:{trial_id}".encode()).hexdigest()[:8], 16)
+    return h
 
 
 async def run_episode(
@@ -35,11 +43,12 @@ async def run_episode(
     episode_id: str,
     trial_id: int,
     cfg: RolloutConfig,
+    seed: int,
 ) -> TrajectoryRecord:
     t0 = time.time()
     r = await env.reset(episode_id, trial_id)
     env_id = r["env_id"]
-    state = agent.new_state()
+    state = agent.new_state(seed)
     public_obs = r["obs"]
     last_obs = {"success": 0.0, "spl": 0.0, "oracle_success": 0.0, "ne": 0.0, "step_count": 0}
     instruction = public_obs["instruction"]
@@ -47,6 +56,7 @@ async def run_episode(
     done_reason = ""
     rotation_count = 0
     last_ne = 999.0
+    env_s = 0.0
 
     try:
         while not done:
@@ -66,7 +76,9 @@ async def run_episode(
             else:
                 action = await agent.act(state, public_obs)
 
+            _t = time.perf_counter()
             step = await env.step(env_id, action)
+            env_s += time.perf_counter() - _t
             last_obs = {
                 "success": step["success"], "spl": step["spl"],
                 "oracle_success": step["oracle_success"], "ne": step["ne"],
@@ -91,6 +103,8 @@ async def run_episode(
         ne=float(last_obs["ne"]),
         env_steps=int(last_obs["step_count"]),
         duration_s=time.time() - t0,
+        vllm_s=state.vllm_s,
+        env_s=env_s,
         done_reason=done_reason,
     )
 

@@ -1,6 +1,8 @@
 """FastAPI front + worker process pool for habitat env.
 
-Pool size starts at 1 (7.3a sanity). Multi-worker concurrency is 7.3c.
+Each worker is one process holding a habitat.Env. Concurrent requests for
+distinct env_ids hit distinct workers (sync endpoints run in a threadpool);
+pool state is guarded by a lock. Set pool size via launch --pool-size.
 
 Endpoints:
   POST   /reset    -> ResetResponse        (public obs only)
@@ -10,6 +12,7 @@ Endpoints:
   GET    /healthz           -> HealthzResponse
 """
 import multiprocessing as mp
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -77,22 +80,30 @@ class WorkerPool:
         for i in range(pool_size):
             self.workers.append(WorkerHandle(i, exp_config_path))
         self.env_id_to_worker: dict[str, WorkerHandle] = {}
+        self._lock = threading.Lock()  # sync endpoints run in a threadpool; guard pool state
 
-    def acquire(self) -> Optional[WorkerHandle]:
-        for w in self.workers:
-            if w.state == "idle" and w.is_alive():
-                return w
-        return None
+    def claim(self, env_id: str, episode_id: str) -> Optional[WorkerHandle]:
+        """Atomically pick an idle worker, mark it busy, register env_id."""
+        with self._lock:
+            for w in self.workers:
+                if w.state == "idle" and w.is_alive():
+                    w.state = "busy"
+                    w.env_id = env_id
+                    w.episode_id = episode_id
+                    self.env_id_to_worker[env_id] = w
+                    return w
+            return None
 
     def get_by_env(self, env_id: str) -> Optional[WorkerHandle]:
         return self.env_id_to_worker.get(env_id)
 
     def release(self, env_id: str):
-        w = self.env_id_to_worker.pop(env_id, None)
-        if w is not None:
-            w.state = "idle"
-            w.env_id = None
-            w.episode_id = None
+        with self._lock:
+            w = self.env_id_to_worker.pop(env_id, None)
+            if w is not None:
+                w.state = "idle"
+                w.env_id = None
+                w.episode_id = None
 
     def close(self):
         for w in self.workers:
@@ -121,17 +132,18 @@ app = FastAPI(lifespan=lifespan)
 @app.post("/reset", response_model=ResetResponse)
 def reset(req: ResetRequest):
     assert _pool is not None
-    w = _pool.acquire()
+    env_id = f"env_{uuid.uuid4().hex[:12]}"
+    w = _pool.claim(env_id, req.episode_id)
     if w is None:
         raise HTTPException(status_code=503, detail="no idle worker")
-    resp = w.call({"op": "reset", "episode_id": req.episode_id}, timeout=120)
+    try:
+        resp = w.call({"op": "reset", "episode_id": req.episode_id}, timeout=120)
+    except Exception:
+        _pool.release(env_id)
+        raise
     if not resp.get("ok"):
+        _pool.release(env_id)
         raise HTTPException(status_code=400, detail=resp.get("error", "reset failed"))
-    env_id = f"env_{uuid.uuid4().hex[:12]}"
-    w.state = "busy"
-    w.env_id = env_id
-    w.episode_id = req.episode_id
-    _pool.env_id_to_worker[env_id] = w
     return ResetResponse(
         env_id=env_id,
         scene_id=resp["scene_id"],
