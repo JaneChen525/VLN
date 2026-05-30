@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from vln.rl.messages import PROMPT_TEMPLATE, SYSTEM_PROMPT, expand_to_atomic, parse_actions
+from vln.rl.messages import (
+    NAVIDA_BRIDGE,
+    NAVIDA_INTRO,
+    SYSTEM_PROMPT,
+    expand_to_atomic,
+    navida_tail,
+    parse_actions,
+)
 from vln.rl.rollout_client.config import RolloutConfig
 from vln.rl.rollout_client.selectors import FrameSelector
 
@@ -40,9 +47,7 @@ def _build_messages(jpeg_b64_list: list[str], current_jpeg_b64: str, instruction
     no decode + re-encode — so the model sees byte-identical bytes vs a direct
     habitat pipeline that JPEG-encodes obs["rgb"] once.
     """
-    intro = "Imagine you are a robot programmed for navigation tasks. You have been given a video of historical observations"
-    bridge = "and an image of the current observation"
-    tail = PROMPT_TEMPLATE.format(instruction).split("current observation")[1]
+    intro, bridge, tail = NAVIDA_INTRO, NAVIDA_BRIDGE, navida_tail(instruction)
 
     content = [{"type": "text", "text": intro}]
     content.extend(

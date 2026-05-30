@@ -14,6 +14,17 @@ PROMPT_TEMPLATE = (
     "which could involve turning left or right by a specific degree or moving forward a certain distance."
 )
 
+# NaVIDA prompt text pieces. The content order is fixed:
+#   [INTRO, *history_images, BRIDGE, current_image, navida_tail(instruction)]
+# Shared by the rollout agent (b64 image urls) and the trainer reconstruction
+# (PIL images) so the two cannot drift apart.
+NAVIDA_INTRO = "Imagine you are a robot programmed for navigation tasks. You have been given a video of historical observations"
+NAVIDA_BRIDGE = "and an image of the current observation"
+
+
+def navida_tail(instruction: str) -> str:
+    return PROMPT_TEMPLATE.format(instruction).split("current observation")[1]
+
 
 def encode_image_base64(image: Image.Image) -> str:
     buf = BytesIO()
