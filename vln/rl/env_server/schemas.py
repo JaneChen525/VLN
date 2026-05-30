@@ -57,3 +57,7 @@ class HealthzResponse(BaseModel):
     ok: bool
     pool_size: int
     workers: list[WorkerStatus]
+
+
+class EpisodesResponse(BaseModel):
+    episode_ids: list[str]

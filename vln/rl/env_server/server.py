@@ -18,6 +18,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 
 from vln.rl.env_server.schemas import (
+    EpisodesResponse,
     HealthzResponse,
     PrivateResponse,
     PublicObs,
@@ -184,6 +185,15 @@ def delete_env(env_id: str):
     assert _pool is not None
     _pool.release(env_id)
     return {"ok": True}
+
+
+@app.get("/episodes", response_model=EpisodesResponse)
+def episodes(limit: int = 100):
+    assert _pool is not None
+    resp = _pool.workers[0].call({"op": "episodes", "limit": limit}, timeout=10)
+    if not resp.get("ok"):
+        raise HTTPException(status_code=500, detail=resp.get("error", "episodes failed"))
+    return EpisodesResponse(episode_ids=resp["episode_ids"])
 
 
 @app.get("/healthz", response_model=HealthzResponse)
