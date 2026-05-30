@@ -29,6 +29,7 @@ class TrajectoryRecord:
     env_s: float = 0.0
     done_reason: str = ""
     aborted: bool = False
+    frames_b64: dict = field(default_factory=dict)  # sha256 -> jpeg b64, only frames used in prompts
 
 
 def trajectory_seed(base_seed: int, episode_id: str, trial_id: int) -> int:
@@ -91,6 +92,14 @@ async def run_episode(
     finally:
         await env.delete_env(env_id)
 
+    # Collect only the frames actually fed into a prompt (dedup by manifest sha256).
+    frames_b64 = {}
+    for t in state.turns:
+        for m in t.image_manifest:
+            sha = m["sha256"]
+            if sha not in frames_b64:
+                frames_b64[sha] = state.jpeg_b64_buffer[m["idx"]]
+
     return TrajectoryRecord(
         episode_id=episode_id,
         trial_id=trial_id,
@@ -106,6 +115,7 @@ async def run_episode(
         vllm_s=state.vllm_s,
         env_s=env_s,
         done_reason=done_reason,
+        frames_b64=frames_b64,
     )
 
 

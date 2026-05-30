@@ -11,6 +11,7 @@ Usage:
 """
 import argparse
 import asyncio
+import base64
 import json
 import os
 import time
@@ -55,6 +56,20 @@ async def _main_async(args):
     sem = asyncio.Semaphore(args.concurrency)
     n_done = 0
 
+    frames_dir = args.frames_dir or os.path.join(os.path.dirname(os.path.abspath(args.out)), "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    seen_frames: set[str] = set()
+
+    def _flush_frames(traj):
+        # Write each unique JPEG once (dedup across turns + trajectories by sha256).
+        for sha, b64 in traj.frames_b64.items():
+            if sha in seen_frames:
+                continue
+            with open(os.path.join(frames_dir, f"{sha}.jpg"), "wb") as f:
+                f.write(base64.b64decode(b64))
+            seen_frames.add(sha)
+        traj.frames_b64 = {}  # free memory
+
     async def _one(ep_id, trial_id):
         nonlocal n_done
         async with sem:
@@ -72,6 +87,7 @@ async def _main_async(args):
 
     all_rows = []
     for traj in trajs:
+        _flush_frames(traj)
         all_rows.extend(trajectory_to_rows(
             traj, cfg, split=args.split,
             policy_version=args.policy_version, rl_step=args.rl_step,
@@ -88,6 +104,8 @@ async def _main_async(args):
         "rows": len(df),
         "unique_groups": int(df["group_id"].nunique()) if len(df) else 0,
         "unique_trajectories": int(df["trajectory_id"].nunique()) if len(df) else 0,
+        "unique_frames": len(seen_frames),
+        "frames_dir": frames_dir,
         "pass_at_k": float(df.drop_duplicates(["trajectory_id"]).groupby("group_id")["success"].max().mean()) if len(df) else 0.0,
         "mean_success": float(df.drop_duplicates(["trajectory_id"])["success"].mean()) if len(df) else 0.0,
         "concurrency": args.concurrency,
@@ -117,6 +135,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--frames-dir", default=None, help="where to write selected frames as <sha256>.jpg; default: <out_dir>/frames")
     args = parser.parse_args()
     asyncio.run(_main_async(args))
 
