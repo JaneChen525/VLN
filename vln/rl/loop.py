@@ -42,14 +42,22 @@ def rollout(env_server, vllm_base, split, policy_version, rl_step, out, frames_d
     ], check=True)
 
 
-def train(parquet, frames_dir, save_dir, ckpt_v0, fsdp_size, rl_step):
+def train(parquet, frames_dir, save_dir, init_ckpt, fsdp_size, rl_step, max_rows):
     inner = (
         f"cd {CONT_ROOT}/WorldModel && PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1,2,3 "
         f"python -m vln.rl.trainer.train_step "
-        f"--ckpt {_host2cont(ckpt_v0)} --parquet {_host2cont(parquet)} --frames {_host2cont(frames_dir)} "
-        f"--save-dir {_host2cont(save_dir)} --fsdp-size {fsdp_size} --max-rows 16 --rl-step {rl_step}"
+        f"--ckpt {_host2cont(init_ckpt)} --parquet {_host2cont(parquet)} --frames {_host2cont(frames_dir)} "
+        f"--save-dir {_host2cont(save_dir)} --fsdp-size {fsdp_size} --max-rows {max_rows} --rl-step {rl_step}"
     )
     subprocess.run(["docker", "exec", "verl-dev", "bash", "-lc", inner], check=True)
+
+
+def sr_of(parquet: str) -> tuple[float, float]:
+    """(pass@k, mean_success) over trajectories in a rollout parquet."""
+    df = pd.read_parquet(parquet).drop_duplicates("trajectory_id")
+    pak = float(df.groupby("group_id")["success"].max().mean())
+    ms = float(df["success"].mean())
+    return pak, ms
 
 
 def main():
@@ -60,9 +68,11 @@ def main():
     p.add_argument("--ckpt-v0", required=True)
     p.add_argument("--work", required=True, help="host work dir for parquet/frames/ckpt")
     p.add_argument("--split", required=True)
+    p.add_argument("--num-steps", type=int, default=1, help="RL steps; SR(v_i) is each step's rollout")
     p.add_argument("--num-episodes", type=int, default=2)
     p.add_argument("--pass-k", type=int, default=4)
     p.add_argument("--fsdp-size", type=int, default=4)
+    p.add_argument("--max-rows", type=int, default=16)
     # T>0 required: greedy (T=0) makes all pass_k trials identical -> degenerate
     # GRPO group -> advantage=0 -> zero gradient (no learning).
     p.add_argument("--temperature", type=float, default=0.7)
@@ -72,9 +82,6 @@ def main():
     vbase = VLLM_BASE.format(port=a.vllm_port)
     os.makedirs(a.work, exist_ok=True)
     frames = os.path.join(a.work, "frames")
-    p0 = os.path.join(a.work, "rollout_step0.parquet")
-    p1 = os.path.join(a.work, "rollout_step1.parquet")
-    ckpt1 = os.path.join(a.work, "ckpt_step1")
 
     # vLLM at v0 (SFT merged). served-model-name pinned so rollout model id is stable.
     start_vllm(a.ckpt_v0, gpus, a.vllm_port, "qwen3vl", tp=len(gpus),
@@ -82,27 +89,31 @@ def main():
     wait_ready(a.vllm_port)
     print("[loop] vLLM up at v0")
 
-    rollout(a.env_server, vbase, a.split, "v0", 0, p0, frames, a.num_episodes, a.pass_k, a.temperature)
-    print("[loop] rollout_0 done ->", p0)
+    cur_ckpt = a.ckpt_v0          # HF dir the trainer inits from (chained each step)
+    curve = []
+    for step in range(a.num_steps):
+        pv = f"v{step}"
+        pq = os.path.join(a.work, f"rollout_step{step}.parquet")
+        # rollout with the current policy v_step
+        rollout(a.env_server, vbase, a.split, pv, step, pq, frames, a.num_episodes, a.pass_k, a.temperature)
+        pak, ms = sr_of(pq)
+        curve.append({"step": step, "policy": pv, "pass_at_k": pak, "mean_success": ms})
+        print(f"[loop] step {step} rollout({pv}) pass@k={pak:.3f} mean_success={ms:.3f}")
 
-    train(p0, frames, ckpt1, a.ckpt_v0, a.fsdp_size, 0)
-    print("[loop] train done ->", ckpt1)
+        # train v_step -> ckpt_step{step+1}, chained from cur_ckpt
+        ckpt_next = os.path.join(a.work, f"ckpt_step{step + 1}")
+        train(pq, frames, ckpt_next, cur_ckpt, a.fsdp_size, step, a.max_rows)
+        cur_ckpt = os.path.join(ckpt_next, "huggingface")
 
-    secs = sync(os.path.join(ckpt1, "huggingface"), gpus, a.vllm_port, "qwen3vl",
-                tp=len(gpus), max_model_len=32768, log_path=os.path.join(a.work, "vllm.log"))
-    print(f"[loop] weight sync done in {secs:.1f}s -> v1")
+        # sync vLLM to v_{step+1}
+        secs = sync(cur_ckpt, gpus, a.vllm_port, "qwen3vl", tp=len(gpus),
+                    max_model_len=32768, log_path=os.path.join(a.work, "vllm.log"))
+        print(f"[loop] step {step} sync {secs:.1f}s -> v{step + 1}")
 
-    rollout(a.env_server, vbase, a.split, "v1", 1, p1, frames, a.num_episodes, a.pass_k, a.temperature)
-    print("[loop] rollout_1 done ->", p1)
-
-    # M3 verify
-    pv0 = pd.read_parquet(p0)["policy_version"].unique().tolist()
-    pv1 = pd.read_parquet(p1)["policy_version"].unique().tolist()
-    hf_ok = os.path.isdir(os.path.join(ckpt1, "huggingface"))
-    print(json.dumps({"rollout0_policy_versions": pv0, "rollout1_policy_versions": pv1,
-                      "ckpt_saved": hf_ok}))
-    assert pv0 == ["v0"] and pv1 == ["v1"] and hf_ok, "M3 verify failed"
-    print("7.4 1-step RL loop PASSED")
+    print("LEARNING CURVE:", json.dumps(curve))
+    with open(os.path.join(a.work, "curve.json"), "w") as f:
+        json.dump(curve, f, indent=2)
+    print(f"{a.num_steps}-step RL loop DONE")
 
 
 if __name__ == "__main__":
