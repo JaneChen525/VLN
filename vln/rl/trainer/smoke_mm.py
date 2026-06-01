@@ -78,8 +78,11 @@ def main():
     data_td = left_right_2_no_padding(data.to_tensordict())
     tu.assign_non_tensor(data_td, global_batch_size=data_td.shape[0])
     metrics = tu.get(wg.train_batch(data_td).get(), "metrics")
-    print("train_batch OK: loss=%s grad_norm=%s" % (metrics.get("loss"), metrics.get("grad_norm")))
-    print("3b-4 multimodal GRPO step PASSED")
+    peak = metrics.get("perf/max_memory_allocated_gb")
+    print("train_batch OK: loss=%s grad_norm=%s peak_mem_gb=%s" % (
+        metrics.get("loss"), metrics.get("grad_norm"), peak))
+    assert peak is None or peak < 40, f"3b-5 memory smoke: peak {peak}GB exceeds 40G"
+    print("3b-4/3b-5 multimodal GRPO step + memory smoke PASSED")
 
 
 if __name__ == "__main__":
