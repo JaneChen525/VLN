@@ -84,6 +84,19 @@ def main():
     assert peak is None or peak < 40, f"3b-5 memory smoke: peak {peak}GB exceeds 40G"
     print("3b-4/3b-5 multimodal GRPO step + memory smoke PASSED")
 
+    # 4a: save a vLLM-loadable HF ckpt
+    save_dir = os.environ.get("VLN_SAVE_DIR")
+    if save_dir:
+        wg.save_checkpoint(save_dir, global_step=1, max_ckpt_to_keep=3)
+        hf = os.path.join(save_dir, "huggingface")
+        files = os.listdir(hf)
+        has_cfg = "config.json" in files
+        has_w = any(f.endswith(".safetensors") for f in files)
+        has_tok = any("tokenizer" in f or f == "vocab.json" for f in files)
+        print(f"4a saved HF ckpt -> {hf}: config={has_cfg} safetensors={has_w} tokenizer={has_tok}")
+        assert has_cfg and has_w and has_tok, f"4a: incomplete HF dir, got {sorted(files)}"
+        print("4a ckpt export PASSED")
+
 
 if __name__ == "__main__":
     main()

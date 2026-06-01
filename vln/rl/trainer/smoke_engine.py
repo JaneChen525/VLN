@@ -42,7 +42,8 @@ def build_config(ckpt, fsdp_size):
         model_config=model_config,
         engine_config=engine_config,
         optimizer_config=FSDPOptimizerConfig(),
-        checkpoint_config=CheckpointConfig(),
+        # hf_model -> save_checkpoint writes a vLLM-loadable HF dir under <path>/huggingface/
+        checkpoint_config=CheckpointConfig(save_contents=["model", "hf_model"]),
     )
 
 
