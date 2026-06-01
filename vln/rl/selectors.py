@@ -1,6 +1,11 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
-from vln.rl.rollout_client.config import FrameSelectionConfig
+
+@dataclass
+class FrameSelectionConfig:
+    strategy: str = "uniform_sample_with_ends"
+    max_frames: int = 8
 
 
 class FrameSelector(ABC):
