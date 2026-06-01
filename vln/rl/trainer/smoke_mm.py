@@ -1,5 +1,6 @@
-"""3b-3: feed a real multimodal parquet batch (pixel_values + image_grid_thw +
-3-D mrope position_ids) through the verl engine forward and get log_probs.
+"""3b-3/3b-4: full GRPO step on a real multimodal parquet batch.
+infer_batch (old_log_probs) -> inject advantages -> train_batch (ppo_loss),
+with pixel_values + image_grid_thw + 3-D mrope position_ids.
 
   docker exec verl-dev bash -lc "cd /workspace/WorldModel && PYTHONPATH=. \
     CUDA_VISIBLE_DEVICES=0,1,2,3 VLN_FSDP_SIZE=4 \
@@ -9,16 +10,18 @@
     python -m vln.rl.trainer.smoke_mm"
 """
 import os
+from functools import partial
 
 import pandas as pd
 import ray
-import torch
 from transformers import AutoProcessor
 
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
+from verl.workers.config import ActorConfig
 from verl.workers.engine_workers import TrainingWorker
+from verl.workers.utils.losses import ppo_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from vln.rl.trainer.advantage import compute_grpo_advantages
@@ -59,12 +62,24 @@ def main():
         meta_info={"temperature": 1.0, "global_token_num": global_token_num, "compute_loss": False},
     )
 
+    # 3b-3: VL forward -> old_log_probs
     data_td = left_right_2_no_padding(data.to_tensordict())
     out = wg.infer_batch(data_td).get()
-    logprobs = no_padding_2_padding(tu.get(out, "log_probs").cpu(), data_td)
-    print("VL forward OK, log_probs shape:", tuple(logprobs.shape),
+    old_log_probs = no_padding_2_padding(tu.get(out, "log_probs").cpu(), data_td)
+    print("VL forward OK, log_probs shape:", tuple(old_log_probs.shape),
           "responses shape:", tuple(batch["responses"].shape))
-    print("3b-3 multimodal forward PASSED")
+
+    # 3b-4: inject old_log_probs + advantages -> one GRPO train step
+    data = data.union(DataProto.from_single_dict({"old_log_probs": old_log_probs}))
+    data.batch["advantages"] = batch["advantages"]
+    wg.set_loss_fn(partial(ppo_loss, config=ActorConfig(
+        strategy="fsdp2", rollout_n=1, ppo_micro_batch_size_per_gpu=-1, use_kl_loss=False)))
+
+    data_td = left_right_2_no_padding(data.to_tensordict())
+    tu.assign_non_tensor(data_td, global_batch_size=data_td.shape[0])
+    metrics = tu.get(wg.train_batch(data_td).get(), "metrics")
+    print("train_batch OK: loss=%s grad_norm=%s" % (metrics.get("loss"), metrics.get("grad_norm")))
+    print("3b-4 multimodal GRPO step PASSED")
 
 
 if __name__ == "__main__":

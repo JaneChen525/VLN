@@ -35,7 +35,7 @@ def build_config(ckpt, fsdp_size):
         forward_only=False, fsdp_size=fsdp_size, strategy="fsdp2", ulysses_sequence_parallel_size=1,
         param_offload=True, optimizer_offload=True, grad_offload=True,
         use_dynamic_bsz=True, use_remove_padding=True,
-        max_token_len_per_gpu=2048, infer_max_token_len_per_gpu=4096,
+        max_token_len_per_gpu=8192, infer_max_token_len_per_gpu=8192,  # >= max VL seq len (9-frame prompt ~2.3k+)
     )
     return TrainingWorkerConfig(
         model_type="language_model",
