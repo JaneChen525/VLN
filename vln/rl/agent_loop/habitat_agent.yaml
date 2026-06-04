@@ -1,6 +1,0 @@
-# verl agent_loop registry entry. Point rollout.agent.agent_loop_config_path here.
-# verl loads this at AgentLoopWorker init and hydra-instantiates by _target_,
-# so verl never has to import our package eagerly.
-- name: habitat
-  _target_: vln.rl.agent_loop.habitat_loop.HabitatAgentLoop
-  env_server_url: http://127.0.0.1:8002
