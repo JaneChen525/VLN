@@ -1,0 +1,5 @@
+[submodule "vln/reinforcement_learning"]
+	path = vln/reinforcement_learning
+	url = https://github.com/JaneChen525/verl.git
+	branch = vln-rl
+	update = none
