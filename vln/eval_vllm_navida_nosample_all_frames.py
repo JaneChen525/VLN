@@ -52,100 +52,108 @@ def load_done_result_keys(result_path):
             except json.JSONDecodeError:
                 continue
             if "scene_id" in item and "episode_id" in item and "episode_instruction" in item:
-                done.add((item["scene_id"], str(item["episode_id"]), item["episode_instruction"]))
+                trial_id = int(item.get("trial_id", 0))
+                trial_total = int(item.get("trial_total", 1))
+                done.add(
+                    (
+                        item["scene_id"],
+                        str(item["episode_id"]),
+                        item["episode_instruction"],
+                        trial_id,
+                        trial_total,
+                    )
+                )
     return done
 
 def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path, num_generations,
                     forward_distance, turn_angle, max_action_history, resolution_ratio,
-                    save_video) -> None:
- 
+                    save_video, pass_k) -> None:
+
     env = Env(config.habitat, dataset)
 
     agent = NaVIDA_Agent(
-        api_key, 
-        base_url, 
-        result_path, 
-        forward_distance, 
-        turn_angle, 
-        max_action_history, 
-        resolution_ratio, 
+        api_key,
+        base_url,
+        result_path,
+        forward_distance,
+        turn_angle,
+        max_action_history,
+        resolution_ratio,
         num_generations,
         save_video=save_video)
 
     num_episodes = len(env.episodes)
     done_result_keys = load_done_result_keys(result_path)
-    
+
     EARLY_STOP_ROTATION = 25
     EARLY_STOP_STEPS = 400
 
     for _ in range(num_episodes):
-        episode_start_time = time.time()
+        for trial_id in range(pass_k):
+            episode_start_time = time.time()
 
-        obs = env.reset()
-        iter_step = 0
-        agent.reset()
+            obs = env.reset()
+            iter_step = 0
+            agent.reset()
 
-        t_dict = {
-            "t_episode": 0,
-        }
+            t_dict = {
+                "t_episode": 0,
+            }
 
-        continuse_rotation_count = 0
-        last_dtg = 999
-        scene_id = env.current_episode.scene_id.split('/')[-2]
-        episode_id = env.current_episode.episode_id
-        episode_instruction = obs["instruction"]["text"]
-        if (scene_id, str(episode_id), episode_instruction) in done_result_keys:
-            t_dict["t_episode"] = time.time() - episode_start_time
-            t_dict["skipped"] = 1
-            result_queue.put(t_dict)
-            continue
-        while not env.episode_over:
-            
+            continuse_rotation_count = 0
+            last_dtg = 999
+            scene_id = env.current_episode.scene_id.split('/')[-2]
+            episode_id = env.current_episode.episode_id
+            episode_instruction = obs["instruction"]["text"]
+            if (scene_id, str(episode_id), episode_instruction, trial_id, pass_k) in done_result_keys:
+                t_dict["t_episode"] = time.time() - episode_start_time
+                t_dict["skipped"] = 1
+                result_queue.put(t_dict)
+                continue
+            while not env.episode_over:
+                info = env.get_metrics()
+
+                if info["distance_to_goal"] != last_dtg:
+                    last_dtg = info["distance_to_goal"]
+                    continuse_rotation_count=0
+                else:
+                    continuse_rotation_count +=1
+
+                action = agent.act(obs, info, env.current_episode.episode_id)
+
+                if continuse_rotation_count > EARLY_STOP_ROTATION or iter_step>EARLY_STOP_STEPS:
+                    action = {"action": 0}
+
+                iter_step+=1
+                obs = env.step(action)
+
             info = env.get_metrics()
-            
-            if info["distance_to_goal"] != last_dtg:
-                last_dtg = info["distance_to_goal"]
-                continuse_rotation_count=0
-            else :
-                continuse_rotation_count +=1 
-            
-            
-            action = agent.act(obs, info, env.current_episode.episode_id)
+            result = {
+                "scene_id": scene_id,
+                "episode_id": int(episode_id) if str(episode_id).isdigit() else episode_id,
+                "trial_id": trial_id,
+                "trial_total": pass_k,
+                "success": info["success"],
+                "spl": info["spl"],
+                "os": info["oracle_success"],
+                "ne": info["distance_to_goal"],
+                "steps": iter_step,
+                "episode_instruction": episode_instruction
+            }
+            with open(os.path.join(result_path, "result.json"), "a") as f:
+                f.write(json.dumps(result) + "\n")
+            done_result_keys.add((scene_id, str(episode_id), episode_instruction, trial_id, pass_k))
 
-            if continuse_rotation_count > EARLY_STOP_ROTATION or iter_step>EARLY_STOP_STEPS:
-                action = {"action": 0}
-
-            
-            iter_step+=1
-            obs = env.step(action)
-            
-        info = env.get_metrics()
-        result = {
-            "scene_id": scene_id,
-            "episode_id": int(episode_id) if str(episode_id).isdigit() else episode_id,
-            "trial_id": 0,
-            "trial_total": 1,
-            "success": info["success"],
-            "spl": info["spl"],
-            "os": info["oracle_success"],
-            "ne": info["distance_to_goal"],
-            "steps": iter_step,
-            "episode_instruction": episode_instruction
-        }
-        with open(os.path.join(result_path, "result.json"), "a") as f:
-            f.write(json.dumps(result) + "\n")
-        done_result_keys.add((scene_id, str(episode_id), episode_instruction))
-        
-        t_dict["t_episode"] = time.time() - episode_start_time
-        result_queue.put(t_dict)
+            t_dict["t_episode"] = time.time() - episode_start_time
+            result_queue.put(t_dict)
 
 class NaVIDA_Agent(Agent):
-    def __init__(self, api_key, base_url, result_path, forward_distance, 
+    def init(self, api_key, base_url, result_path, forward_distance,
                     turn_angle, max_action_history, resolution_ratio, num_generations = 1,
                     save_video=False):
-        
+
         print("Initialize NaVIDA")
-        
+
         self.result_path = result_path
         self.save_video = save_video
         self.forward_distance = forward_distance
@@ -161,8 +169,8 @@ class NaVIDA_Agent(Agent):
             api_key=api_key,
             base_url=base_url,
         )
-        self.model = self.client.models.list().data[0].id
-        
+        self.model = os.environ.get("OPENAI_MODEL") or self.client.models.list().data[0].id
+
         self.temperature = 0.3
         self.top_p = 0.95
         self.max_tokens = 512
@@ -172,7 +180,7 @@ class NaVIDA_Agent(Agent):
             "Your assigned task is: '{}'. Analyze this series of images to decide your next move, "\
             "which could involve turning left or right by a specific degree or moving forward a certain distance."
         self.history_rgb_tensor = None
-        
+
         self.rgb_list = []
         self.topdown_map_list = []
         self.conversations = []
@@ -202,7 +210,7 @@ class NaVIDA_Agent(Agent):
         )
         output_text = outputs.choices[0].message.content
         output_text = output_text.strip()
-        
+
         return output_text
 
     def extract_multi_result(self, output):
@@ -241,13 +249,13 @@ class NaVIDA_Agent(Agent):
             match = match.group()
             return 3, float(match)
         return None, None
-    
+
 
     def addtext(self, image, instuction, navigation):
         h, w = image.shape[:2]
         new_height = h + 150
         new_image = np.zeros((new_height, w, 3), np.uint8)
-        new_image.fill(255)  
+        new_image.fill(255)
         new_image[:h, :w] = image
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -292,8 +300,8 @@ class NaVIDA_Agent(Agent):
             return "turn right"
         else:
             raise ValueError(f"Invalid action ID: {action_id}")
-        
-    def reset(self):       
+
+    def reset(self):
         if self.save_video:
             if len(self.topdown_map_list)!=0:
                 output_video_path = os.path.join(self.result_path, "video","{}.gif".format(self.episode_id))
@@ -309,7 +317,7 @@ class NaVIDA_Agent(Agent):
         self.conversations.append({
             "role": "system",
             "content": [{"type": "text", "text": SYSTEM_PROMPT}]})
-        
+
     def act(self, observations, info, episode_id):
 
         self.episode_id = episode_id
@@ -329,7 +337,7 @@ class NaVIDA_Agent(Agent):
 
         if len(self.pending_action_list) != 0 :
             temp_action = self.pending_action_list.pop(0)
-            
+
             if self.save_video:
                 img = self.addtext(output_im, observations["instruction"]["text"], "Pending action: {}".format(temp_action))
                 self.topdown_map_list.append(img)
@@ -341,7 +349,7 @@ class NaVIDA_Agent(Agent):
 
         content.append({"type": "text", "text": 'Imagine you are a robot programmed for navigation tasks. You have been given a video of historical observations'})
         if len(self.rgb_list) > 1:
-            content.extend([{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_base64(item)}"}} for item in self.uniform_sample_with_ends(self.rgb_list[:-1],8)])
+            content.extend([{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_base64(item)}"}} for item in self.rgb_list[:-1]])
         else:
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_base64(self.rgb_list[-1])}"}})
         content.append({"type": "text", "text": 'and an image of the current observation'})
@@ -356,11 +364,11 @@ class NaVIDA_Agent(Agent):
             })
 
         navigation = self.predict_inference()
-        
+
         if self.save_video:
             img = self.addtext(output_im, observations["instruction"]["text"], navigation)
             self.topdown_map_list.append(img)
-        
+
         result = self.extract_multi_result(navigation)
 
         select_action_idx = 2
@@ -381,7 +389,7 @@ class NaVIDA_Agent(Agent):
             elif action_index == 3:
                 for _ in range(min(3,round(numeric/self.turn_angle))):
                     self.pending_action_list.append(3)
-            
+
             if action_index is None or len(self.pending_action_list)==0:
                 print('random select an action')
                 action_index = random.randint(1, 3)
@@ -403,6 +411,7 @@ def main():
     parser.add_argument("--turn-angle",type=int,help="angle that one turn action takes",default=15)
     parser.add_argument("--max-action-history",type=int,help="the maximum num of action history",default=10)
     parser.add_argument("--num-generations",type=int,help="whether use video or multi image",default=1)
+    parser.add_argument("--pass-k", type=int, default=1, help="run each trajectory k times")
     parser.add_argument(
         "--save_vedio",
         action="store_true",
@@ -437,34 +446,47 @@ def main():
                 "collisions": CollisionsMeasurementConfig(),
             }
         )
-            
+
     dataset = habitat.datasets.make_dataset(id_dataset=config.habitat.dataset.type, config=config.habitat.dataset)
     dataset_splits = dataset.get_splits(args.split_num, allow_uneven_splits=True)
 
-    num_episodes = len(dataset.episodes) 
+    num_episodes = len(dataset.episodes)
 
     manager = mp.Manager()
     result_queue = manager.Queue()
     processes = []
     for i in range(args.split_num):
-        worker_args = (result_queue, api_key, base_url, config, dataset_splits[i], args.result_path,
-                args.num_generations, args.forward_distance, args.turn_angle, 
-                args.max_action_history, args.resolution_ratio, args.save_vedio)
+        worker_args = (
+            result_queue,
+            api_key,
+            base_url,
+            config,
+            dataset_splits[i],
+            args.result_path,
+            args.num_generations,
+            args.forward_distance,
+            args.turn_angle,
+            args.max_action_history,
+            args.resolution_ratio,
+            args.save_vedio,
+            args.pass_k,
+        )
         p = mp.Process(target=evaluate_agent, args=worker_args, daemon=True)
         p.start()
         processes.append(p)
 
-    with tqdm(total=num_episodes, desc="Evaluating") as pbar:
-        for _ in range(num_episodes):
+    with tqdm(total=num_episodes * args.pass_k, desc="Evaluating") as pbar:
+        for _ in range(num_episodes * args.pass_k):
             result = result_queue.get()
             pbar.update(1)
             pbar.set_postfix(**result)
-    
+
     for p in processes:
         p.join()
 
     result_file = os.path.join(args.result_path, "result.json")
-    n_run, s_suc, s_spl, s_os, s_ne, s_step = 0, 0.0, 0.0, 0.0, 0.0, 0.0
+    n_run, s_suc = 0, 0.0
+    traj_results = {}
     if os.path.exists(result_file):
         with open(result_file, "r") as f:
             for line in f:
@@ -475,41 +497,66 @@ def main():
                     item = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not all(
-                    k in item
-                    for k in (
-                        "scene_id",
-                        "episode_id",
-                        "episode_instruction",
-                        "success",
-                        "spl",
-                        "os",
-                        "ne",
-                        "steps",
-                    )
-                ):
+                if not all(k in item for k in ("scene_id", "episode_id", "episode_instruction", "success", "spl", "os", "ne", "steps")):
                     continue
                 n_run += 1
-                s_suc += float(item["success"])
-                s_spl += float(item["spl"])
-                s_os += float(item["os"])
-                s_ne += float(item["ne"])
-                s_step += float(item["steps"])
+                success = float(item["success"])
+                spl = float(item["spl"])
+                os_val = float(item["os"])
+                ne = float(item["ne"])
+                s_suc += success
+                traj_key = (item["scene_id"], str(item["episode_id"]), item["episode_instruction"])
+                if traj_key not in traj_results:
+                    traj_results[traj_key] = {
+                        "pass_success": success,
+                        "pass_spl": spl,
+                        "pass_os": os_val,
+                        "pass_ne": ne,
+                    }
+                else:
+                    traj_results[traj_key]["pass_success"] = max(traj_results[traj_key]["pass_success"], success)
+                    traj_results[traj_key]["pass_spl"] = max(traj_results[traj_key]["pass_spl"], spl)
+                    traj_results[traj_key]["pass_os"] = max(traj_results[traj_key]["pass_os"], os_val)
+                    traj_results[traj_key]["pass_ne"] = min(traj_results[traj_key]["pass_ne"], ne)
 
-    if n_run:
+    n_traj = len(traj_results)
+    if n_run and n_traj:
+        pass_k_value = int(args.pass_k)
+        pass_at_k_key = f"pass@{pass_k_value}"
+        avg_k_key = f"avg{pass_k_value}"
+        pass_suc = sum(v["pass_success"] for v in traj_results.values()) / n_traj
+        pass_spl = sum(v["pass_spl"] for v in traj_results.values()) / n_traj
+        pass_os = sum(v["pass_os"] for v in traj_results.values()) / n_traj
+        pass_ne = sum(v["pass_ne"] for v in traj_results.values()) / n_traj
+        avg_success = s_suc / n_run
         summary = {
-            "sucs_all": s_suc / n_run,
-            "spls_all": s_spl / n_run,
-            "oss_all": s_os / n_run,
-            "ones_all": s_ne / n_run,
-            "avg_step": s_step / n_run,
+            "sucs_all": avg_success,
+            "spls_all": pass_spl,
+            "oss_all": pass_os,
+            "ones_all": pass_ne,
+            "length": pass_ne,
+            "pass_k": pass_k_value,
+            pass_at_k_key: pass_suc,
+            avg_k_key: avg_success,
         }
     else:
-        summary = {k: None for k in ("sucs_all", "spls_all", "oss_all", "ones_all", "avg_step")}
+        pass_k_value = int(args.pass_k)
+        pass_at_k_key = f"pass@{pass_k_value}"
+        avg_k_key = f"avg{pass_k_value}"
+        summary = {
+            "sucs_all": None,
+            "spls_all": None,
+            "oss_all": None,
+            "ones_all": None,
+            "length": None,
+            "pass_k": pass_k_value,
+            pass_at_k_key: None,
+            avg_k_key: None,
+        }
 
     print(json.dumps(summary, ensure_ascii=False))
     with open(result_file, "a") as f:
         f.write(json.dumps(summary, ensure_ascii=False) + "\n")
 
-if __name__ == "__main__":
+if name == "main":
     main()
