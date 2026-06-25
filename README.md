@@ -1,116 +1,110 @@
 # VLN
 
-## 0. Conda 环境
-- `vln / vllm`：`python==3.10`
-- `llamafactory`：`python==3.12`
+VLN（Vision-and-Language Navigation）RL 训练框架。基于 Qwen3-VL + LoRA，在 Habitat 仿真环境中用 GRPO 做强化学习。
 
-## 1. llamafactory
+## 分支 & 版本
+
+| 分支/Tag | 说明 |
+|----------|------|
+| `vlnrlV3.1.0` | RL 框架开发主线（最新） |
+| tag `VLNrlV3.1.0` | 稳定版（P10 验证通过，全指标 +1pp vs SFT baseline） |
+| `main` | 上游 baseline（DAgger + SFT + eval） |
+
+## 快速开始
+
+详细复现指南见 [028-teammate-reproduction-guide.md](028-teammate-reproduction-guide.md)。
+
 ```bash
-pip install -e ".[torch,metrics]" --no-build-isolation -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/
+git clone https://github.com/JaneChen525/VLN.git WorldModel && cd WorldModel
+git checkout VLNrlV3.1.0
+git submodule update --init vln/reinforcement_learning
+cd vln/reinforcement_learning && git checkout VLNrlV3.1.0 && cd ../..
 ```
 
-## 2. vllm
+### 依赖
+
+- **Host**：Conda Python 3.10 + habitat-sim/lab v0.3.3（渲染）
+- **Docker**：`verlai/verl:vllm011.latest`（训练，含 vllm 0.11 + ray + torch 2.8）
+- **数据**：MP3D 场景 + R2R episodes + SFT checkpoint + manifest parquet
+
+### 训练（GRPO）
+
 ```bash
-pip install vllm==0.16.0
-conda activate vllm
+# 1. Host: 启动 env_server
+PYTHONPATH=vln/reinforcement_learning:.:vln python \
+  -m recipe.vln_navida.env_server.launch \
+  --exp-config config/vln_r2r.yaml --port 8002 --pool-size 32 \
+  --gpu-ids 0,1,2,3,4,5,6,7 --split train
+
+# 2. 启动 Docker 容器
+docker run -d --name verl-dev \
+  --gpus all --network host --ipc host --privileged --shm-size 32g \
+  --entrypoint sleep \
+  -v <你的工作目录>:/workspace \
+  verlai/verl:vllm011.latest infinity
+
+# 3. Docker: Window 模式（稳定版，P10 验证通过）
+nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
+cd /workspace/WorldModel && \
+TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
+VAL_FILE=/workspace/WorldModel/data/manifests/vln_r2r_val_unseen_1839.parquet \
+TOTAL_STEPS=30 SAVE_FREQ=10 \
+TRAIN_BATCH_SIZE=32 ROLLOUT_N=4 NUM_WORKERS=32 \
+PPO_MINI_BATCH_SIZE=32 PPO_MICRO_BATCH_SIZE=4 LOG_PROB_MICRO=4 \
+ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
+ROLLOUT_WINDOW=32 \
+EXPERIMENT=p10-window \
+bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_window.log 2>&1 &
+
+# 3. Docker: Sliding 模式（最新版，待测试，消除 window barrier bubble）
+nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
+cd /workspace/WorldModel && \
+TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
+VAL_FILE=/workspace/WorldModel/data/manifests/vln_r2r_val_unseen_1839.parquet \
+TOTAL_STEPS=30 SAVE_FREQ=10 \
+TRAIN_BATCH_SIZE=32 ROLLOUT_N=4 NUM_WORKERS=32 \
+PPO_MINI_BATCH_SIZE=32 PPO_MICRO_BATCH_SIZE=4 LOG_PROB_MICRO=4 \
+ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
+ROLLOUT_WINDOW=32 \
+ROLLOUT_SCHEDULER=sliding \
+EXPERIMENT=p10-sliding \
+bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_sliding.log 2>&1 &
+```
+
+### 评测
+
+```bash
+# vLLM 服务
 bash scripts/vllm_qwenvln.sh
-```
 
-在 `scripts/vllm_qwenvln.sh` 中修改 `BASE_MODEL`、`ADAPTER`、`CUDA_VISIBLE_DEVICES` 与端口后启动服务。评测前在 `vln` 环境中设置（端口需与脚本一致）：
-
-```bash
-export OPENAI_API_KEY=EMPTY
-export OPENAI_API_BASE=http://127.0.0.1:8001/v1
-```
-
-## 3. 仿真/交互环境（vln）
-```bash
-pip install -r requirements.txt
-```
-
-## 4.Habitat安装
-```bash
-bash tool/habitat.sh
-```
-
-## 5. VLN-CE Episodes
-
-Download the VLN-CE episodes and extract them into the `data/datasets/` directory:
-
-- [r2r](https://drive.google.com/file/d/1fo8F4NKgZDH-bPSdVU3cONAkt5EW-tyr/view) (Rename `R2R_VLNCE_v1-3_preprocessed/` -> `r2r/`)
-- [rxr](https://drive.google.com/file/d/145xzLjxBaNTbVgBfQ8e9EsBAV8W-SM0t/view) (Rename `RxR_VLNCE_v0/` -> `rxr/`)
-- [scalevln](https://huggingface.co/datasets/cywan/StreamVLN-Trajectory-Data/blob/main/ScaleVLN/scalevln_subset_150k.json.gz) (Follow the StreamVLN to convert a subset of the ScaleVLN dataset into the VLN-CE format.)
-
-## 6. 工具
-```bash
-# 评测
- python vln/qwen3vln_eval.py   --use_vllm   --vllm_base_url http://10.176.62.171:8003/v1   --vllm_model_name qwen3vl   --habitat_config_path config/vln_r2r.yaml   --eval_split val_unseen   --output_path ./results/qwen3vln_eval_2b_all  --temperature 0.3 --use_collision_prompt --parallel_envs 16 --save_sharegpt
-
-# 轨迹处理
-conda activate vln
-python tool/trajectory_making.py
-
-# 下载 MP3D
-conda activate vln
-python tool/download_mp.py
-
-# 下载 ScanNetv2
-conda activate vln
-python tool/download_scannetv2.py
-```
-
-## 7. NaVIDA 评测（vLLM + Habitat）
-
-通过 OpenAI 兼容 API 调用本地 vLLM，在 VLN-CE（R2R / RxR）上跑 NaVIDA 式多图导航评测。
-
-| 脚本 | 说明 |
-|------|------|
-| `vln/eval_vllm.py` | **原版**：每条 episode 只评测 1 次，`trial_id=0`、`trial_total=1` |
-| `vln/eval_vllm_navida.py` | **pass@k**：同一条轨迹跑 `k` 次，汇总 `pass@k` / `avg@k` |
-
-**流程**：先 `bash scripts/vllm_qwenvln.sh` 启动 vLLM，再在仓库根目录修改 `scripts/eval_vllm.sh` 中的 `CONFIG_PATH`、`SAVE_PATH`、`OPENAI_API_BASE` 后执行：
-
-```bash
-conda activate vln
-bash scripts/eval_vllm.sh
-```
-
-仓库内 `scripts/eval_vllm.sh` 默认调用 `eval_vllm_navida.py` 且 `--pass-k 4`；若要用原版单次评测，将其中 Python 入口改为 `eval_vllm.py` 并去掉 `--pass-k`。
-
-**`eval_vllm.py` 命令示例（原版，单次）**
-
-```bash
-export PYTHONPATH=$(pwd):$PYTHONPATH
-export OPENAI_API_KEY=EMPTY
-export OPENAI_API_BASE=http://127.0.0.1:8001/v1
-
-python vln/eval_vllm.py \
-  --exp-config config/vln_r2r.yaml \
-  --split-num 16 \
-  --result-path ./results/navida_r2r_single \
-  --forward-distance 25 \
-  --turn-angle 15 \
-  --max-action-history 200 \
-  --num-generations 1
-```
-
-**`eval_vllm_navida.py` 命令示例（pass@k）**
-
-```bash
+# NaVIDA pass@k 评测
 python vln/eval_vllm_navida.py \
-  --exp-config config/vln_r2r.yaml \
-  --split-num 16 \
-  --pass-k 4 \
-  --result-path ./results/navida_r2r_pass4 \
-  --forward-distance 25 \
-  --turn-angle 15 \
-  --max-action-history 200 \
-  --num-generations 1
+  --exp-config config/vln_r2r.yaml --split-num 16 --pass-k 4 \
+  --result-path ./results/eval_output
 ```
 
-结果写入 `--result-path/result.json`（JSONL）：每行一条 episode（navida 含 `trial_id` / `trial_total`），**最后一行**为汇总指标。中断后重跑会自动跳过已完成条目。
+## 项目结构
 
-## 8. dagger运行
-```bash
-bash scripts/habitat.sh
 ```
+VLN/
+├── vln/
+│   ├── eval_vllm_navida.py          # NaVIDA pass@k 评测
+│   ├── dagger.py                    # DAgger 数据收集
+│   └── reinforcement_learning/      # verl submodule（RL 框架）
+│       └── recipe/vln_navida/       # VLN GRPO recipe
+│           ├── run_grpo.sh          # 训练入口
+│           ├── online_rollout_manager.py  # rollout + flatten
+│           ├── full_episode_agent_loop.py # episode 循环
+│           ├── env_server/          # Habitat 渲染服务
+│           └── reward.py            # reward 函数
+├── config/vln_r2r.yaml              # Habitat + 评测配置
+├── tool/convert.py                  # 轨迹 → ShareGPT
+└── scripts/                         # vLLM / eval 启动脚本
+```
+
+## 文档
+
+| 文档 | 内容 |
+|------|------|
+| [复现指南](028-teammate-reproduction-guide.md) | 通用机器复现指南（从零开始） |
+
