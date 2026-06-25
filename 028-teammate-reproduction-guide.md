@@ -229,17 +229,17 @@ tail -f /tmp/env_server.log
 ```bash
 docker restart verl-dev && sleep 6
 
-# Smoke test（1 step 验证全链路，~25min）
-docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
+# Smoke test（3 step 验证全链路，~30min）
+nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
 cd /workspace/WorldModel && \
 TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
 VAL_FILE=/workspace/WorldModel/data/manifests/vln_r2r_val_unseen_1839.parquet \
-TRAIN_BATCH_SIZE=8 ROLLOUT_N=2 TOTAL_STEPS=1 SAVE_FREQ=999 \
-NUM_WORKERS=8 ROLLOUT_WINDOW=8 \
-PPO_MINI_BATCH_SIZE=8 PPO_MICRO_BATCH_SIZE=2 LOG_PROB_MICRO=2 \
-ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
-EXPERIMENT=smoke-window \
-bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh'
+TOTAL_STEPS=3 SAVE_FREQ=999 \
+TRAIN_BATCH_SIZE=8 ROLLOUT_N=2 NUM_WORKERS=16 \
+PPO_MINI_BATCH_SIZE=8 ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
+ROLLOUT_WINDOW=16 \
+EXPERIMENT=phase1-smoke-3step \
+bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_phase1.log 2>&1 &
 ```
 
 Smoke 通过后，正式训练（P10 复现配置）：
@@ -266,17 +266,17 @@ bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_windo
 docker restart verl-dev && sleep 6
 
 # Smoke test
-docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
+nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
 cd /workspace/WorldModel && \
 TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
 VAL_FILE=/workspace/WorldModel/data/manifests/vln_r2r_val_unseen_1839.parquet \
-TRAIN_BATCH_SIZE=8 ROLLOUT_N=2 TOTAL_STEPS=1 SAVE_FREQ=999 \
-NUM_WORKERS=8 ROLLOUT_WINDOW=8 \
-PPO_MINI_BATCH_SIZE=8 PPO_MICRO_BATCH_SIZE=2 LOG_PROB_MICRO=2 \
-ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
+TOTAL_STEPS=3 SAVE_FREQ=999 \
+TRAIN_BATCH_SIZE=8 ROLLOUT_N=2 NUM_WORKERS=16 \
+PPO_MINI_BATCH_SIZE=8 ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
+ROLLOUT_WINDOW=16 \
 ROLLOUT_SCHEDULER=sliding \
-EXPERIMENT=smoke-sliding \
-bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh'
+EXPERIMENT=phase1-smoke-3step-sliding \
+bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_sliding_smoke.log 2>&1 &
 ```
 
 正式训练：

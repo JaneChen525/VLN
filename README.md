@@ -43,7 +43,19 @@ docker run -d --name verl-dev \
   -v <你的工作目录>:/workspace \
   verlai/verl:vllm011.latest infinity
 
-# 3. Docker: Window 模式（稳定版，P10 验证通过）
+# 3. Docker: 快速测试 8*2（smoke test，~30min）
+nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
+cd /workspace/WorldModel && \
+TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
+VAL_FILE=/workspace/WorldModel/data/manifests/vln_r2r_val_unseen_1839.parquet \
+TOTAL_STEPS=3 SAVE_FREQ=999 \
+TRAIN_BATCH_SIZE=8 ROLLOUT_N=2 NUM_WORKERS=16 \
+PPO_MINI_BATCH_SIZE=8 ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
+ROLLOUT_WINDOW=16 \
+EXPERIMENT=phase1-smoke-3step \
+bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_phase1.log 2>&1 &
+
+# 4. Docker: 正式训练 Window 模式（P10 验证通过）
 nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
 cd /workspace/WorldModel && \
 TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
@@ -56,7 +68,7 @@ ROLLOUT_WINDOW=32 \
 EXPERIMENT=p10-window \
 bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh' > /tmp/grpo_window.log 2>&1 &
 
-# 3. Docker: Sliding 模式（最新版，待测试，消除 window barrier bubble）
+# 4. Docker: 正式训练 Sliding 模式（待测试，消除 window barrier bubble）
 nohup docker exec -e VLLM_MM_INPUT_CACHE_GIB=8 verl-dev bash -c '
 cd /workspace/WorldModel && \
 TRAIN_FILE=/workspace/WorldModel/data/manifests/vln_r2r_train_filtered_966.parquet \
