@@ -64,7 +64,47 @@ def seed_all(seed=42):
     random.seed(seed)
 
 
-def load_done_result_keys(result_path):
+def canonical_episode_key(scene_id, episode_id):
+    """Return the stable key shared by Habitat episodes and manifest rows."""
+    scene = os.path.splitext(os.path.basename(str(scene_id)))[0]
+    return scene, str(episode_id)
+
+
+def load_manifest_episode_metadata(manifest_path):
+    """Load exact episode membership and prior pass rate from a VLN parquet."""
+    import pyarrow.parquet as pq
+
+    rows = pq.read_table(manifest_path, columns=["extra_info"]).to_pylist()
+    metadata = {}
+    for row in rows:
+        info = row["extra_info"]
+        key = canonical_episode_key(info["scene_id"], info["episode_id"])
+        if key in metadata:
+            raise ValueError(f"Duplicate episode in manifest: {key}")
+        metadata[key] = {
+            "manifest_pass_rate": info.get("pass_rate"),
+            "manifest_instruction": info.get("instruction"),
+        }
+    return metadata
+
+
+def filter_dataset_by_manifest(dataset, manifest_metadata):
+    """Filter and order Habitat episodes exactly as the manifest."""
+    by_key = {
+        canonical_episode_key(episode.scene_id, episode.episode_id): episode
+        for episode in dataset.episodes
+    }
+    missing = [key for key in manifest_metadata if key not in by_key]
+    if missing:
+        raise ValueError(
+            f"Manifest has {len(missing)} episodes absent from Habitat data; "
+            f"first missing keys: {missing[:5]}"
+        )
+    dataset.episodes = [by_key[key] for key in manifest_metadata]
+    return dataset
+
+
+def load_done_result_keys(result_path, require_trajectory=False):
     result_file = os.path.join(result_path, "result.json")
     done = set()
     if not os.path.exists(result_file):
@@ -79,6 +119,14 @@ def load_done_result_keys(result_path):
             except json.JSONDecodeError:
                 continue
             if "scene_id" in item and "episode_id" in item and "episode_instruction" in item:
+                if require_trajectory:
+                    base_map = item.get("trajectory_base_map")
+                    if (
+                        not item.get("trajectory_points")
+                        or not base_map
+                        or not os.path.isfile(os.path.join(result_path, base_map))
+                    ):
+                        continue
                 trial_id = int(item.get("trial_id", 0))
                 trial_total = int(item.get("trial_total", 1))
                 done.add(
@@ -93,10 +141,36 @@ def load_done_result_keys(result_path):
     return done
 
 
+def trajectory_episode_name(scene_id, episode_id):
+    scene = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(scene_id))
+    episode = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(episode_id))
+    return f"{scene}_ep{episode}"
+
+
+def save_trajectory_base_map(result_path, scene_id, episode_id, top_down_map):
+    trajectory_dir = os.path.join(result_path, "trajectories")
+    os.makedirs(trajectory_dir, exist_ok=True)
+    filename = f".{trajectory_episode_name(scene_id, episode_id)}_base.png"
+    output_path = os.path.join(trajectory_dir, filename)
+    if not os.path.isfile(output_path):
+        imageio.imwrite(output_path, maps.colorize_topdown_map(top_down_map))
+    return os.path.relpath(output_path, result_path)
+
+
+def get_agent_map_point(top_down_map_info):
+    """Return the first agent coordinate as OpenCV (x, y)."""
+    coordinates = top_down_map_info.get("agent_map_coord") or []
+    if not coordinates:
+        return None
+    row, column = coordinates[0]
+    return [int(column), int(row)]
+
+
 def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path,
                    num_generations, forward_distance, turn_angle, max_action_history,
                    resolution_ratio, save_video, pass_k, temperature,
-                   render_gpu_id=0):
+                   render_gpu_id=0, manifest_metadata=None,
+                   save_trajectory_map=False):
 
     if render_gpu_id >= 0:
         from omegaconf import read_write
@@ -118,7 +192,9 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
     )
 
     num_episodes = len(env.episodes)
-    done_result_keys = load_done_result_keys(result_path)
+    done_result_keys = load_done_result_keys(
+        result_path, require_trajectory=save_trajectory_map
+    )
     episodes_snapshot = list(env.episodes)
 
     EARLY_STOP_ROTATION = 25
@@ -145,8 +221,23 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
 
             continuse_rotation_count = 0
             last_dtg = 999
+            trajectory_points = []
+            trajectory_base_map = None
             while not env.episode_over:
                 info = env.get_metrics()
+
+                if save_trajectory_map:
+                    if trajectory_base_map is None:
+                        trajectory_base_map = save_trajectory_base_map(
+                            result_path,
+                            scene_id,
+                            episode_id,
+                            info["top_down_map"]["map"],
+                        )
+                    point = get_agent_map_point(info["top_down_map"])
+                    if point is not None:
+                        if not trajectory_points or point != trajectory_points[-1]:
+                            trajectory_points.append(point)
 
                 if info["distance_to_goal"] != last_dtg:
                     last_dtg = info["distance_to_goal"]
@@ -163,6 +254,11 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
                 obs = env.step(action)
 
             info = env.get_metrics()
+            if save_trajectory_map:
+                point = get_agent_map_point(info["top_down_map"])
+                if point is not None:
+                    if not trajectory_points or point != trajectory_points[-1]:
+                        trajectory_points.append(point)
             result = {
                 "scene_id": scene_id,
                 "episode_id": int(episode_id) if str(episode_id).isdigit() else episode_id,
@@ -175,6 +271,13 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
                 "steps": iter_step,
                 "episode_instruction": episode_instruction,
             }
+            metadata = (manifest_metadata or {}).get(
+                canonical_episode_key(scene_id, episode_id), {}
+            )
+            result.update(metadata)
+            if save_trajectory_map:
+                result["trajectory_points"] = trajectory_points
+                result["trajectory_base_map"] = trajectory_base_map
             with open(os.path.join(result_path, "result.json"), "a") as f:
                 f.write(json.dumps(result) + "\n")
             done_result_keys.add((scene_id, str(episode_id), episode_instruction, trial_id, pass_k))
@@ -337,7 +440,9 @@ class NaVIDA_Agent(Agent):
     def reset(self):
         if self.save_video:
             if len(self.topdown_map_list) != 0:
-                output_video_path = os.path.join(self.result_path, "video", "{}.gif".format(self.episode_id))
+                output_video_path = os.path.join(
+                    self.result_path, "video", "{}.gif".format(self.episode_id)
+                )
                 imageio.mimsave(output_video_path, self.topdown_map_list)
 
         self.topdown_map_list = []
@@ -435,36 +540,40 @@ class NaVIDA_Agent(Agent):
 def compute_difficulty_csv(result_path, output_csv, pass_k):
     """Read result.json and compute per-episode pass_rate → CSV."""
     result_file = os.path.join(result_path, "result.json")
-    episodes = {}
+    trials_by_key = {}
     with open(result_file, "r") as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue
             try:
                 item = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 continue
-            if "scene_id" not in item or "episode_id" not in item:
+            if not all(key in item for key in ("scene_id", "episode_id", "trial_id")):
                 continue
-            if "pass_k" in item:
-                continue
-            key = (item["scene_id"], str(item["episode_id"]))
-            if key not in episodes:
-                episodes[key] = {
-                    "scene_id": item["scene_id"],
-                    "episode_id": item["episode_id"],
-                    "successes": 0,
-                    "trials": 0,
-                    "ne_sum": 0.0,
-                    "spl_sum": 0.0,
-                    "steps_sum": 0,
-                }
-            episodes[key]["trials"] += 1
-            episodes[key]["successes"] += int(item["success"])
-            episodes[key]["ne_sum"] += float(item["ne"])
-            episodes[key]["spl_sum"] += float(item["spl"])
-            episodes[key]["steps_sum"] += int(item["steps"])
+            key = (
+                *canonical_episode_key(item["scene_id"], item["episode_id"]),
+                int(item["trial_id"]),
+            )
+            trials_by_key[key] = item
+
+    episodes = {}
+    for item in trials_by_key.values():
+        key = canonical_episode_key(item["scene_id"], item["episode_id"])
+        if key not in episodes:
+            episodes[key] = {
+                "scene_id": item["scene_id"],
+                "episode_id": item["episode_id"],
+                "manifest_pass_rate": item.get("manifest_pass_rate"),
+                "successes": 0,
+                "trials": 0,
+                "ne_sum": 0.0,
+                "spl_sum": 0.0,
+                "steps_sum": 0,
+            }
+        episodes[key]["trials"] += 1
+        episodes[key]["successes"] += int(item["success"])
+        episodes[key]["ne_sum"] += float(item["ne"])
+        episodes[key]["spl_sum"] += float(item["spl"])
+        episodes[key]["steps_sum"] += int(item["steps"])
 
     rows = []
     for key, ep in sorted(episodes.items()):
@@ -472,6 +581,7 @@ def compute_difficulty_csv(result_path, output_csv, pass_k):
         rows.append({
             "scene_id": ep["scene_id"],
             "episode_id": ep["episode_id"],
+            "manifest_pass_rate": ep["manifest_pass_rate"],
             "pass_k": k,
             "success_count": ep["successes"],
             "pass_rate": ep["successes"] / k if k > 0 else 0.0,
@@ -483,7 +593,7 @@ def compute_difficulty_csv(result_path, output_csv, pass_k):
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     with open(output_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "scene_id", "episode_id", "pass_k", "success_count",
+            "scene_id", "episode_id", "manifest_pass_rate", "pass_k", "success_count",
             "pass_rate", "avg_ne", "avg_spl", "avg_steps",
         ])
         writer.writeheader()
@@ -498,13 +608,151 @@ def compute_difficulty_csv(result_path, output_csv, pass_k):
     print(f"Difficulty Analysis: {output_csv}")
     print(f"{'='*60}")
     print(f"Total episodes:   {n_total}")
-    print(f"Easy (rate=1.0):  {n_easy} ({100*n_easy/n_total:.1f}%)")
-    print(f"Hard (rate=0.0):  {n_hard} ({100*n_hard/n_total:.1f}%)")
-    print(f"Boundary (0<r<1): {n_boundary} ({100*n_boundary/n_total:.1f}%)")
+    denominator = max(1, n_total)
+    print(f"Easy (rate=1.0):  {n_easy} ({100*n_easy/denominator:.1f}%)")
+    print(f"Hard (rate=0.0):  {n_hard} ({100*n_hard/denominator:.1f}%)")
+    print(f"Boundary (0<r<1): {n_boundary} ({100*n_boundary/denominator:.1f}%)")
     print(f"Avg pass_rate:    {avg_pass_rate:.3f}")
     print(f"{'='*60}\n")
 
     return rows
+
+
+def _draw_wrapped_text(image, text, origin, max_width, scale=0.55, thickness=1):
+    x, y = origin
+    line = ""
+    for word in str(text).split():
+        candidate = f"{line} {word}".strip()
+        width = cv2.getTextSize(candidate, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)[0][0]
+        if line and width > max_width:
+            cv2.putText(
+                image, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (25, 25, 25), thickness, cv2.LINE_AA,
+            )
+            y += 24
+            line = word
+        else:
+            line = candidate
+    if line:
+        cv2.putText(
+            image, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+            scale, (25, 25, 25), thickness, cv2.LINE_AA,
+        )
+    return y
+
+
+def build_episode_trajectory_maps(result_path, pass_k):
+    """Create one PNG per episode with all pass@K paths overlaid."""
+    result_file = os.path.join(result_path, "result.json")
+    deduped = {}
+    with open(result_file) as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not item.get("trajectory_points") or not item.get("trajectory_base_map"):
+                continue
+            key = (
+                *canonical_episode_key(item.get("scene_id"), item.get("episode_id")),
+                int(item.get("trial_id", 0)),
+            )
+            deduped[key] = item
+
+    episodes = {}
+    for item in deduped.values():
+        key = canonical_episode_key(item["scene_id"], item["episode_id"])
+        episodes.setdefault(key, []).append(item)
+
+    success_colors = [
+        (0, 105, 45), (0, 135, 60), (0, 165, 80), (0, 190, 105),
+        (25, 150, 120), (40, 175, 140), (55, 195, 155), (70, 215, 170),
+    ]
+    failure_colors = [
+        (170, 0, 25), (195, 20, 35), (220, 35, 45), (235, 55, 35),
+        (190, 0, 90), (215, 25, 110), (235, 50, 130), (245, 75, 145),
+    ]
+    output_dir = os.path.join(result_path, "trajectory_maps")
+    os.makedirs(output_dir, exist_ok=True)
+
+    generated = 0
+    for (scene, episode), trials in episodes.items():
+        trials.sort(key=lambda item: int(item["trial_id"]))
+        success_count = sum(int(item["success"]) for item in trials)
+        base_path = os.path.join(result_path, trials[0]["trajectory_base_map"])
+        base = imageio.imread(base_path)
+        if base.ndim == 2:
+            base = np.repeat(base[:, :, None], 3, axis=2)
+        base = np.ascontiguousarray(base[:, :, :3].copy())
+        map_height, map_width = base.shape[:2]
+        header_height = 130
+        sidebar_width = 430
+        canvas = np.full(
+            (map_height + header_height, map_width + sidebar_width, 3),
+            255, dtype=np.uint8,
+        )
+        canvas[header_height:, :map_width] = base
+
+        instruction = trials[0].get("episode_instruction", "")
+        prior = trials[0].get("manifest_pass_rate")
+        prior_text = "n/a" if prior is None else f"{float(prior):.3f}"
+        title = (
+            f"scene={scene}  episode={episode}  success={success_count}/{pass_k}  "
+            f"prior_pass_rate={prior_text}"
+        )
+        cv2.putText(
+            canvas, title, (16, 30), cv2.FONT_HERSHEY_SIMPLEX,
+            0.68, (20, 20, 20), 2, cv2.LINE_AA,
+        )
+        _draw_wrapped_text(canvas, instruction, (16, 60), map_width + sidebar_width - 32)
+
+        for item in trials:
+            trial_id = int(item["trial_id"])
+            succeeded = bool(item["success"])
+            palette = success_colors if succeeded else failure_colors
+            color = palette[trial_id % len(palette)]
+            points = np.asarray(item["trajectory_points"], dtype=np.int32)
+            points[:, 1] += header_height
+            cv2.polylines(
+                canvas, [points.reshape(-1, 1, 2)], False,
+                color, 4, cv2.LINE_AA,
+            )
+            start = tuple(int(value) for value in points[0])
+            end = tuple(int(value) for value in points[-1])
+            cv2.circle(canvas, start, 6, (30, 90, 220), -1, cv2.LINE_AA)
+            cv2.circle(canvas, end, 7, color, -1, cv2.LINE_AA)
+            cv2.putText(
+                canvas, f"t{trial_id}", (end[0] + 7, end[1] - 7),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA,
+            )
+
+            legend_y = header_height + 34 + trial_id * 58
+            legend_x = map_width + 24
+            cv2.line(
+                canvas, (legend_x, legend_y), (legend_x + 48, legend_y),
+                color, 5, cv2.LINE_AA,
+            )
+            status = "SUCCESS" if succeeded else "FAILURE"
+            cv2.putText(
+                canvas, f"trial {trial_id}: {status}",
+                (legend_x + 62, legend_y + 5), cv2.FONT_HERSHEY_SIMPLEX,
+                0.58, color, 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas,
+                f"NE={float(item['ne']):.2f}m  SPL={float(item['spl']):.3f}  steps={int(item['steps'])}",
+                (legend_x, legend_y + 27), cv2.FONT_HERSHEY_SIMPLEX,
+                0.47, (45, 45, 45), 1, cv2.LINE_AA,
+            )
+
+        output_path = os.path.join(
+            output_dir, f"{trajectory_episode_name(scene, episode)}_8rollouts.png"
+        )
+        imageio.imwrite(output_path, canvas)
+        generated += 1
+
+    print(f"Trajectory maps: {generated} PNGs in {output_dir}")
+    return generated
 
 
 def main():
@@ -529,9 +777,15 @@ def main():
                         help="Total number of shards (1 = no sharding)")
     parser.add_argument("--num-render-gpus", type=int, default=1,
                         help="Number of GPUs for habitat rendering (workers round-robin)")
+    parser.add_argument("--render-gpu-offset", type=int, default=0,
+                        help="First physical GPU id used for Habitat rendering")
+    parser.add_argument("--episode-manifest", type=str, default="",
+                        help="Optional VLN parquet whose episodes are evaluated exactly")
     parser.add_argument("--output-csv", type=str, default="",
                         help="Per-episode difficulty CSV path (default: <result-path>/episode_difficulty.csv)")
     parser.add_argument("--save_vedio", action="store_true")
+    parser.add_argument("--save-trajectory-map", action="store_true",
+                        help="Save one PNG overlaying all pass@K trajectories per episode")
     args = parser.parse_args()
 
     if not args.output_csv:
@@ -568,6 +822,15 @@ def main():
         id_dataset=config.habitat.dataset.type, config=config.habitat.dataset
     )
 
+    manifest_metadata = {}
+    if args.episode_manifest:
+        manifest_metadata = load_manifest_episode_metadata(args.episode_manifest)
+        filter_dataset_by_manifest(dataset, manifest_metadata)
+        print(
+            f"Manifest filter: {len(dataset.episodes)} episodes from "
+            f"{args.episode_manifest}"
+        )
+
     total_episodes = len(dataset.episodes)
     if args.max_episode > 0 and args.max_episode < total_episodes:
         random.seed(42)
@@ -592,7 +855,10 @@ def main():
     processes = []
     num_render_gpus = args.num_render_gpus
     for i in range(args.split_num):
-        render_gpu_id = i % num_render_gpus if num_render_gpus > 0 else -1
+        render_gpu_id = (
+            args.render_gpu_offset + i % num_render_gpus
+            if num_render_gpus > 0 else -1
+        )
         worker_args = (
             result_queue,
             api_key,
@@ -609,6 +875,8 @@ def main():
             args.pass_k,
             args.temperature,
             render_gpu_id,
+            manifest_metadata,
+            args.save_trajectory_map,
         )
         p = mp.Process(target=evaluate_agent, args=worker_args, daemon=True)
         p.start()
@@ -624,6 +892,8 @@ def main():
         p.join()
 
     rows = compute_difficulty_csv(args.result_path, args.output_csv, args.pass_k)
+    if args.save_trajectory_map:
+        build_episode_trajectory_maps(args.result_path, args.pass_k)
 
 
 if __name__ == "__main__":
