@@ -11,7 +11,7 @@ CKPT=Qwen3VL_4B_Final_swift
 RAID=/raid/$JOBID
 NFS=$HOME/janec
 RESULT_PATH=$NFS/results/task16/$RESULT_DIR
-MANIFEST=$NFS/data/manifests/vln_r2r_train_filtered_966.parquet
+MANIFEST=${MANIFEST:-$NFS/data/manifests/vln_r2r_train_filtered_966.parquet}
 EVAL_SCRIPT=$RAID/WorldModel/vln/difficulty_trajectory_eval.py
 MAX_EPISODE=${MAX_EPISODE:-0}
 SPLIT_NUM=${SPLIT_NUM:-24}
@@ -43,6 +43,10 @@ if [[ ! -f "$MANIFEST" ]]; then
   mkdir -p "$(dirname "$MANIFEST")"
   curl -fsSL --retry 3 "$MANIFEST_URL" -o "$MANIFEST"
 fi
+"$RAID/bin/python" -c 'import pyarrow' || {
+  echo "pyarrow is required to read $MANIFEST"
+  exit 1
+}
 
 CFG=$RAID/WorldModel/config/vln_r2r_trajectory.yaml
 cp "$RAID/WorldModel/config/vln_r2r.yaml" "$CFG"
