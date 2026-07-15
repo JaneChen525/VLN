@@ -2,8 +2,8 @@
 # One-node ipp6 evaluation: R2R filtered 966, pass@8, one trajectory PNG/episode.
 # Usage: bash ~/janec/run_r2r_filtered966_trajectory_eval.sh <JOBID> [RESULT_DIR]
 
-set -euo pipefail
 source /etc/profile 2>/dev/null || true
+set -euo pipefail
 
 JOBID=${1:?"Usage: bash $0 <JOBID> [RESULT_DIR]"}
 RESULT_DIR=${2:-r2r_filtered966_trajectory}
