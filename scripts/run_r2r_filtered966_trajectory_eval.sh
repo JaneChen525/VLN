@@ -43,10 +43,10 @@ if [[ ! -f "$MANIFEST" ]]; then
   mkdir -p "$(dirname "$MANIFEST")"
   curl -fsSL --retry 3 "$MANIFEST_URL" -o "$MANIFEST"
 fi
-"$RAID/bin/python" -c 'import pyarrow' || {
-  echo "pyarrow is required to read $MANIFEST"
-  exit 1
-}
+if ! "$RAID/bin/python" -c 'import pyarrow' 2>/dev/null; then
+  echo "Installing pyarrow into the job-local conda environment..."
+  "$RAID/bin/python" -m pip install --no-cache-dir pyarrow
+fi
 
 CFG=$RAID/WorldModel/config/vln_r2r_trajectory.yaml
 cp "$RAID/WorldModel/config/vln_r2r.yaml" "$CFG"
