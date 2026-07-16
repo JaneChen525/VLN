@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=p13-grpo-4step
+#SBATCH --job-name=grpo-4step
 #SBATCH --account=general_perflab
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -14,10 +14,10 @@ umask 007
 
 WORK=/lustre/fsw/portfolios/general/users/jiaychen
 WORLDMODEL=$WORK/WorldModel
-EXP=p13-env4-final-mrope-traj-grpo-32x8
-TOTAL_STEPS=30
-STEPS_PER_JOB=4
-SAVE_FREQ=4
+EXP=${EXP:-p13-env4-final-mrope-traj-grpo-32x8}
+TOTAL_STEPS=${TOTAL_STEPS:-30}
+STEPS_PER_JOB=${STEPS_PER_JOB:-4}
+SAVE_FREQ=${SAVE_FREQ:-4}
 
 CKPT_ROOT=$WORLDMODEL/checkpoints/vln-grpo/$EXP
 TRACKER=$CKPT_ROOT/latest_checkpointed_iteration.txt
@@ -56,8 +56,8 @@ if (( TARGET_STEP > TOTAL_STEPS )); then
 fi
 echo "Job segment: step $CURRENT_STEP -> $TARGET_STEP"
 
-# P13 uses a constant LR. Ending this invocation at TARGET_STEP lets verl save,
-# close W&B, and exit normally without changing the effective LR schedule.
+# P13/P14 use a constant LR. Ending this invocation at TARGET_STEP lets verl
+# save, close W&B, and exit normally without changing the effective LR schedule.
 cd "$WORLDMODEL"
 PYTHONPATH="$WORLDMODEL/vln/reinforcement_learning:$WORLDMODEL:$WORLDMODEL/vln:${PYTHONPATH:-}" \
   "$WORK/miniconda3/envs/vln/bin/python" \

@@ -10,8 +10,10 @@ EXP=${EXP:-p13-env4-final-mrope-traj-grpo-32x8}
 TOTAL_STEPS=${TOTAL_STEPS:-30}
 PLANNED_JOBS=${PLANNED_JOBS:-8}
 BUFFER_JOBS=${BUFFER_JOBS:-2}
-CHAIN_FILE=${CHAIN_FILE:-$WORK/logs/p13-grpo-4step-job-chain.txt}
+JOB_NAME=${JOB_NAME:-${EXP}-4step}
+CHAIN_FILE=${CHAIN_FILE:-$WORK/logs/${EXP}-job-chain.txt}
 TRACKER=$WORK/WorldModel/checkpoints/vln-grpo/$EXP/latest_checkpointed_iteration.txt
+SBATCH_EXPORT="ALL,EXP=$EXP,TOTAL_STEPS=$TOTAL_STEPS"
 
 bash -n "$SBATCH_SCRIPT"
 mkdir -p "$WORK/logs"
@@ -34,9 +36,10 @@ job_ids=()
 previous_job=""
 for _ in $(seq 1 "$job_count"); do
   if [[ -z "$previous_job" ]]; then
-    job_id=$(sbatch --parsable "$SBATCH_SCRIPT")
+    job_id=$(sbatch --parsable --job-name="$JOB_NAME" --export="$SBATCH_EXPORT" "$SBATCH_SCRIPT")
   else
-    job_id=$(sbatch --parsable --dependency="afterany:$previous_job" "$SBATCH_SCRIPT")
+    job_id=$(sbatch --parsable --job-name="$JOB_NAME" --export="$SBATCH_EXPORT" \
+      --dependency="afterany:$previous_job" "$SBATCH_SCRIPT")
   fi
   job_ids+=("$job_id")
   previous_job=$job_id
