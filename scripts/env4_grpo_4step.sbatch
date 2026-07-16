@@ -10,6 +10,7 @@
 #SBATCH --error=/lustre/fsw/portfolios/general/users/jiaychen/logs/%x-%j.log
 
 set -euo pipefail
+umask 007
 
 WORK=/lustre/fsw/portfolios/general/users/jiaychen
 WORLDMODEL=$WORK/WorldModel
@@ -24,6 +25,17 @@ ENV_LOG=$WORK/logs/env-server-${SLURM_JOB_ID}.log
 
 mkdir -p "$WORK/logs" "$WORLDMODEL/wandb"
 
+sync_wandb_only() {
+  srun --overlap \
+    --container-image=verlai/verl:vllm011.latest \
+    --container-mounts=$WORK:$WORK \
+    bash -c "
+export HOME=$WORK/.wandb-home
+export WANDB_DIR=$WORLDMODEL/wandb
+bash $WORLDMODEL/scripts/sync_wandb_run.sh \"\$WANDB_DIR\" $EXP
+"
+}
+
 CURRENT_STEP=0
 if [[ -s "$TRACKER" ]]; then
   CURRENT_STEP=$(tr -d '[:space:]' < "$TRACKER")
@@ -34,6 +46,7 @@ if ! [[ "$CURRENT_STEP" =~ ^[0-9]+$ ]]; then
 fi
 if (( CURRENT_STEP >= TOTAL_STEPS )); then
   echo "Training already complete: step=$CURRENT_STEP"
+  sync_wandb_only
   exit 0
 fi
 
@@ -43,6 +56,8 @@ if (( TARGET_STEP > TOTAL_STEPS )); then
 fi
 echo "Job segment: step $CURRENT_STEP -> $TARGET_STEP"
 
+# P13 uses a constant LR. Ending this invocation at TARGET_STEP lets verl save,
+# close W&B, and exit normally without changing the effective LR schedule.
 cd "$WORLDMODEL"
 PYTHONPATH="$WORLDMODEL/vln/reinforcement_learning:$WORLDMODEL:$WORLDMODEL/vln:${PYTHONPATH:-}" \
   "$WORK/miniconda3/envs/vln/bin/python" \
@@ -52,12 +67,8 @@ PYTHONPATH="$WORLDMODEL/vln/reinforcement_learning:$WORLDMODEL:$WORLDMODEL/vln:$
   --gpu-ids 0,1,2,3,4,5,6,7 --split train \
   > "$ENV_LOG" 2>&1 &
 ENV_PID=$!
-TRAIN_PID=""
 
 cleanup() {
-  if [[ -n "$TRAIN_PID" ]]; then
-    kill "$TRAIN_PID" 2>/dev/null || true
-  fi
   kill "$ENV_PID" 2>/dev/null || true
   wait "$ENV_PID" 2>/dev/null || true
 }
@@ -98,11 +109,12 @@ export VLLM_MM_INPUT_CACHE_GIB=32
 export ROLLOUT_SCHEDULER=sliding
 export ROLLOUT_WINDOW=32
 
+TRAIN_RC=0
 cd $WORLDMODEL && \
 MODEL_PATH=$WORK/checkpoints/Qwen3VL_4B_Final_swift \
 TRAIN_FILE=$WORK/data/manifests/vln_r2r_train_filtered_966.parquet \
 VAL_FILE=$WORK/data/manifests/vln_r2r_val_unseen_1839.parquet \
-TOTAL_STEPS=$TOTAL_STEPS SAVE_FREQ=$SAVE_FREQ \
+TOTAL_STEPS=$TARGET_STEP SAVE_FREQ=$SAVE_FREQ \
 TRAIN_BATCH_SIZE=32 ROLLOUT_N=8 NUM_WORKERS=32 \
 ROLLOUT_WINDOW=32 ROLLOUT_SCHEDULER=sliding \
 PPO_MINI_BATCH_SIZE=32 PPO_MICRO_BATCH_SIZE=4 LOG_PROB_MICRO=4 \
@@ -110,25 +122,19 @@ ROLLOUT_TP=4 GPU_MEM_UTIL=0.5 \
 ADV_ESTIMATOR=grpo_trajectory \
 EXPERIMENT=$EXP \
 bash vln/reinforcement_learning/recipe/vln_navida/run_grpo.sh \
-trainer.resume_mode=auto
-" &
-TRAIN_PID=$!
+trainer.resume_mode=auto || TRAIN_RC=\$?
 
-while kill -0 "$TRAIN_PID" 2>/dev/null; do
-  CHECKPOINT_STEP=0
-  if [[ -s "$TRACKER" ]]; then
-    CHECKPOINT_STEP=$(tr -d '[:space:]' < "$TRACKER")
-  fi
+SYNC_RC=0
+bash scripts/sync_wandb_run.sh \"\$WANDB_DIR\" \"\$WANDB_RUN_ID\" || SYNC_RC=\$?
+if (( TRAIN_RC != 0 )); then
+  exit \$TRAIN_RC
+fi
+exit \$SYNC_RC
+"
 
-  if [[ "$CHECKPOINT_STEP" =~ ^[0-9]+$ ]] && (( CHECKPOINT_STEP >= TARGET_STEP )); then
-    echo "Completed job segment at checkpoint step $CHECKPOINT_STEP"
-    if (( CHECKPOINT_STEP < TOTAL_STEPS )); then
-      echo "Auto-cancelling Slurm job $SLURM_JOB_ID"
-      scancel "$SLURM_JOB_ID"
-    fi
-    break
-  fi
-  sleep 5
-done
-
-wait "$TRAIN_PID"
+CHECKPOINT_STEP=$(tr -d '[:space:]' < "$TRACKER")
+if ! [[ "$CHECKPOINT_STEP" =~ ^[0-9]+$ ]] || (( CHECKPOINT_STEP < TARGET_STEP )); then
+  echo "Segment ended without target checkpoint: expected=$TARGET_STEP actual=$CHECKPOINT_STEP"
+  exit 1
+fi
+echo "Completed job segment at checkpoint step $CHECKPOINT_STEP"
