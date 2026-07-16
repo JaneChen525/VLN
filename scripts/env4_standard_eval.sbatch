@@ -1,13 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=vln-std-eval
 #SBATCH --account=general_perflab
-#SBATCH --partition=backfill_singlenode
+#SBATCH --partition=polar,polar3,polar4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=8
 #SBATCH --cpus-per-task=64
-#SBATCH --time=12:00:00
-#SBATCH --requeue
+#SBATCH --time=4:00:00
 #SBATCH --output=/lustre/fsw/portfolios/general/users/jiaychen/logs/%x-%j.log
 #SBATCH --error=/lustre/fsw/portfolios/general/users/jiaychen/logs/%x-%j.log
 
