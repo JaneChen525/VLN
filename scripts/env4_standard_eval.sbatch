@@ -40,6 +40,7 @@ DONE=$RESULT_DIR/EVAL_COMPLETE
 echo "MODEL_PATH=$MODEL_PATH"
 echo "RESULT_DIR=$RESULT_DIR"
 echo "PORT=$PORT PASS_K=$PASS_K SPLIT_NUM=$SPLIT_NUM"
+echo "Standard protocol: T=0.3 top_p=0.95 max_tokens=512 hfov=90 forward=25cm turn=15deg history=200"
 echo "vLLM GPUs=$VLLM_GPU_IDS DP=$VLLM_DP TP=$VLLM_TP max_num_seqs=$VLLM_MAX_NUM_SEQS mm_cache_gb=$VLLM_MM_CACHE_GB"
 echo "Habitat render GPU=$RENDER_GPU"
 
@@ -66,8 +67,31 @@ fi
 
 test -x "$PYTHON"
 test -f "$MODEL_PATH/config.json"
+compgen -G "$MODEL_PATH/*.safetensors" >/dev/null
 test -f "$WORK/data/vln_eval_datasets/r2r/val_unseen/val_unseen.json.gz"
 test -d "$WORK/data/scene_datasets"
+
+# Freeze the evaluator used by the ipp6 standard runs. Difficulty-eval
+# settings (T=0.6/pass@8) must never leak into this protocol.
+grep -Fq 'self.temperature = 0.3' "$WORLDMODEL/vln/eval_vllm_navida.py"
+grep -Fq 'self.top_p = 0.95' "$WORLDMODEL/vln/eval_vllm_navida.py"
+grep -Fq 'self.max_tokens = 512' "$WORLDMODEL/vln/eval_vllm_navida.py"
+grep -Fq 'episodes_snapshot = list(env.episodes)' "$WORLDMODEL/vln/eval_vllm_navida.py"
+grep -Fq 'env.current_episode = target_ep' "$WORLDMODEL/vln/eval_vllm_navida.py"
+
+"$PYTHON" - "$MODEL_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+model = pathlib.Path(sys.argv[1])
+config = json.loads((model / "config.json").read_text())
+tokenizer = json.loads((model / "tokenizer_config.json").read_text())
+rope = config["text_config"]["rope_scaling"]
+assert rope["mrope_section"] == [24, 20, 20], rope
+assert isinstance(tokenizer.get("extra_special_tokens", {}), dict)
+print("MODEL_METADATA_OK", rope)
+PY
 
 cp "$WORLDMODEL/config/vln_r2r.yaml" "$CONFIG"
 sed -i -E 's/(hfov:).*/\1 90/' "$CONFIG"
@@ -75,6 +99,22 @@ sed -i -E "s/(gpu_device_id:).*/\1 $RENDER_GPU/" "$CONFIG"
 sed -i -E 's/(split:).*/\1 val_unseen/' "$CONFIG"
 sed -i -E "s|(scenes_dir:).*|\1 $WORK/data/scene_datasets|" "$CONFIG"
 sed -i -E "s|(data_path:).*|\1 $WORK/data/vln_eval_datasets/r2r/{split}/{split}.json.gz|" "$CONFIG"
+
+HFOV_COUNT=$(grep -Ec '^[[:space:]]+hfov:[[:space:]]+90$' "$CONFIG")
+SUCCESS_COUNT=$(grep -Ec '^[[:space:]]+success_distance:[[:space:]]+3\.0$' "$CONFIG")
+if (( HFOV_COUNT != 2 )); then
+  echo "Expected RGB+Depth hfov=90, found $HFOV_COUNT entries" >&2
+  exit 2
+fi
+if (( SUCCESS_COUNT != 2 )); then
+  echo "Expected success/oracle_success distance=3.0, found $SUCCESS_COUNT entries" >&2
+  exit 2
+fi
+grep -Eq '^[[:space:]]+split:[[:space:]]+val_unseen$' "$CONFIG"
+grep -Eq '^[[:space:]]+max_episode_steps:[[:space:]]+400$' "$CONFIG"
+grep -Eq '^[[:space:]]+forward_step_size:[[:space:]]+0\.25$' "$CONFIG"
+grep -Eq '^[[:space:]]+turn_angle:[[:space:]]+15$' "$CONFIG"
+echo "EVAL_CONFIG_OK hfov=$HFOV_COUNT success_distance=$SUCCESS_COUNT"
 
 VLLM_PID=""
 cleanup() {

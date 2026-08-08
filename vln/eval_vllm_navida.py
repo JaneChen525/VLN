@@ -92,8 +92,17 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
     EARLY_STOP_STEPS = 400
 
     for target_ep in episodes_snapshot:
+        scene_id = target_ep.scene_id.split('/')[-2]
+        episode_id = target_ep.episode_id
+        episode_instruction = target_ep.instruction.instruction_text
         for trial_id in range(pass_k):
             episode_start_time = time.time()
+
+            # Resume before env.reset(): skipped trials must not reload scenes
+            # or initialize sensors in every 4h continuation job.
+            if (scene_id, str(episode_id), episode_instruction, trial_id, pass_k) in done_result_keys:
+                result_queue.put({"t_episode": 0, "skipped": 1})
+                continue
 
             # Pin this trial to target_ep. The current_episode setter sets
             # _episode_from_iter_on_reset=False, so reset() reuses target_ep
@@ -109,14 +118,6 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
 
             continuse_rotation_count = 0
             last_dtg = 999
-            scene_id = env.current_episode.scene_id.split('/')[-2]
-            episode_id = env.current_episode.episode_id
-            episode_instruction = obs["instruction"]["text"]
-            if (scene_id, str(episode_id), episode_instruction, trial_id, pass_k) in done_result_keys:
-                t_dict["t_episode"] = time.time() - episode_start_time
-                t_dict["skipped"] = 1
-                result_queue.put(t_dict)
-                continue
             while not env.episode_over:
                 info = env.get_metrics()
 
