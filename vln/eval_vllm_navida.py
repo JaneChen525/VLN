@@ -20,6 +20,7 @@ from habitat.config.default_structured_configs import (
 )
 from PIL import Image, ImageFont, ImageDraw
 import multiprocessing as mp
+import queue
 import time, math
 from openai import OpenAI
 import base64
@@ -37,37 +38,39 @@ def seed_all():
     np.random.seed(41)
     random.seed(41)
 
-def load_done_result_keys(result_path):
-    result_file = os.path.join(result_path, "result.json")
+def load_done_result_keys(result_path, extra_result_files=None):
+    result_files = [os.path.join(result_path, "result.json")]
+    result_files.extend(extra_result_files or [])
     done = set()
-    if not os.path.exists(result_file):
-        return done
-    with open(result_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if "scene_id" in item and "episode_id" in item and "episode_instruction" in item:
-                trial_id = int(item.get("trial_id", 0))
-                trial_total = int(item.get("trial_total", 1))
-                done.add(
-                    (
-                        item["scene_id"],
-                        str(item["episode_id"]),
-                        item["episode_instruction"],
-                        trial_id,
-                        trial_total,
+    for result_file in result_files:
+        if not result_file or not os.path.exists(result_file):
+            continue
+        with open(result_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "scene_id" in item and "episode_id" in item and "episode_instruction" in item:
+                    trial_id = int(item.get("trial_id", 0))
+                    trial_total = int(item.get("trial_total", 1))
+                    done.add(
+                        (
+                            item["scene_id"],
+                            str(item["episode_id"]),
+                            item["episode_instruction"],
+                            trial_id,
+                            trial_total,
+                        )
                     )
-                )
     return done
 
 def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path, num_generations,
                     forward_distance, turn_angle, max_action_history, resolution_ratio,
-                    save_video, pass_k) -> None:
+                    save_video, pass_k, skip_result_files=None) -> None:
  
     env = Env(config.habitat, dataset)
 
@@ -83,7 +86,7 @@ def evaluate_agent(result_queue, api_key, base_url, config, dataset, result_path
         save_video=save_video)
 
     num_episodes = len(env.episodes)
-    done_result_keys = load_done_result_keys(result_path)
+    done_result_keys = load_done_result_keys(result_path, skip_result_files)
     # Snapshot episodes so pass_k trials can stay on the same target episode
     # rather than advancing through the dataset iterator.
     episodes_snapshot = list(env.episodes)
@@ -420,12 +423,28 @@ def main():
     parser.add_argument("--max-action-history",type=int,help="the maximum num of action history",default=10)
     parser.add_argument("--num-generations",type=int,help="whether use video or multi image",default=1)
     parser.add_argument("--pass-k", type=int, default=1, help="run each trajectory k times")
+    parser.add_argument("--shard-id", type=int, default=0, help="zero-based episode shard id")
+    parser.add_argument("--num-shards", type=int, default=1, help="number of fixed episode shards")
+    parser.add_argument(
+        "--skip-result-file",
+        action="append",
+        default=[],
+        help="additional result.json whose completed trials should be skipped (repeatable)",
+    )
     parser.add_argument(
         "--save_vedio",
         action="store_true",
         help="if set, save per-episode top-down+gifs under result-path/video",
     )
     args = parser.parse_args()
+
+    if args.num_shards < 1 or not 0 <= args.shard_id < args.num_shards:
+        parser.error("require num-shards >= 1 and 0 <= shard-id < num-shards")
+    if args.split_num < 1 or args.pass_k < 1:
+        parser.error("require split-num >= 1 and pass-k >= 1")
+    for result_file in args.skip_result_file:
+        if not os.path.isfile(result_file):
+            parser.error(f"skip-result-file is not a file: {result_file}")
 
     api_key = os.environ.get("OPENAI_API_KEY")
     base_url = os.environ.get("OPENAI_API_BASE")
@@ -456,14 +475,29 @@ def main():
         )
             
     dataset = habitat.datasets.make_dataset(id_dataset=config.habitat.dataset.type, config=config.habitat.dataset)
-    dataset_splits = dataset.get_splits(args.split_num, allow_uneven_splits=True)
-
+    if args.num_shards > 1:
+        dataset.episodes.sort(
+            key=lambda episode: (
+                os.path.basename(os.path.dirname(str(episode.scene_id))),
+                str(episode.episode_id),
+                episode.instruction.instruction_text,
+            )
+        )
+        dataset.episodes = dataset.episodes[args.shard_id::args.num_shards]
+        print(
+            f"Episode shard {args.shard_id}/{args.num_shards}: "
+            f"{len(dataset.episodes)} episodes"
+        )
     num_episodes = len(dataset.episodes)
+    if num_episodes == 0:
+        parser.error("selected episode shard is empty")
+    worker_count = min(args.split_num, num_episodes)
+    dataset_splits = dataset.get_splits(worker_count, allow_uneven_splits=True)
 
     manager = mp.Manager()
     result_queue = manager.Queue()
     processes = []
-    for i in range(args.split_num):
+    for i in range(worker_count):
         worker_args = (
             result_queue,
             api_key,
@@ -478,19 +512,38 @@ def main():
             args.resolution_ratio,
             args.save_vedio,
             args.pass_k,
+            args.skip_result_file,
         )
         p = mp.Process(target=evaluate_agent, args=worker_args, daemon=True)
         p.start()
         processes.append(p)
 
-    with tqdm(total=num_episodes * args.pass_k, desc="Evaluating") as pbar:
-        for _ in range(num_episodes * args.pass_k):
-            result = result_queue.get()
+    expected_results = num_episodes * args.pass_k
+    completed_results = 0
+    with tqdm(total=expected_results, desc="Evaluating") as pbar:
+        while completed_results < expected_results:
+            try:
+                result = result_queue.get(timeout=30)
+            except queue.Empty:
+                failed = [(i, p.exitcode) for i, p in enumerate(processes) if p.exitcode not in (None, 0)]
+                if failed or not any(p.is_alive() for p in processes):
+                    for p in processes:
+                        if p.is_alive():
+                            p.terminate()
+                    raise RuntimeError(
+                        f"evaluation workers exited before producing all results: "
+                        f"completed={completed_results}/{expected_results}, failed={failed}"
+                    )
+                continue
+            completed_results += 1
             pbar.update(1)
             pbar.set_postfix(**result)
     
     for p in processes:
         p.join()
+    failed = [(i, p.exitcode) for i, p in enumerate(processes) if p.exitcode != 0]
+    if failed:
+        raise RuntimeError(f"evaluation workers failed: {failed}")
 
     result_file = os.path.join(args.result_path, "result.json")
     n_run, s_suc = 0, 0.0
