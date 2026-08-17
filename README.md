@@ -21,6 +21,9 @@ Vision-and-Language Navigation：在 Habitat 仿真环境中，给定自然语�
 > 24 + Driver 570 的宿主预检、完整构建脚本和精确依赖锁见
 > [`environment/qwen35_verl_conda/`](environment/qwen35_verl_conda/README.md)。
 > 本目录只配置训练环境，不包含 Habitat 或 RL smoke workflow。
+> 从原 Qwen3-VL 实验迁移到 Qwen3.5 时，还必须区分 GDN/FA2/FSDP2
+> 运行栈适配与 RL 超参数，详见
+> [`QWEN3_VS_QWEN35.md`](environment/qwen35_verl_conda/QWEN3_VS_QWEN35.md)。
 
 ### 硬件要求
 
@@ -54,9 +57,11 @@ bash tool/habitat.sh          # 安装 habitat-sim 0.2.4 + habitat-lab 0.2.4
 pip install vllm==0.16.0      # eval 用（非 RL 训练）
 ```
 
-### Step 3: Docker 容器（RL 训练）
+### Step 3: Legacy Qwen3-VL Docker 容器（RL 训练）
 
-RL 训练在 verl 容器中运行，host 上的 conda `vln` 环境运行 Habitat env_server。
+本节是原 Qwen3-VL 实验的 legacy 路径：RL 训练在 Verl 容器中运行，
+host 上的 Conda `vln` 环境运行 Habitat env_server。Qwen3.5 请使用
+上文的裸机 Conda 配方，不要在同一运行中混用两套 Python/CUDA 栈。
 
 ```bash
 # 拉取 verl 官方镜像

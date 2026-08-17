@@ -6,9 +6,10 @@ Conda 环境，不依赖 Docker 或 Slurm，也不安装、启动或修改 Habit
 
 ## 已验证范围
 
-该配方已在 8×A100 上完成两次真实 one-step RL 验证：一次使用原始环境，
-一次从空 Conda prefix 重建。两次均走通 FSDP2 forward/backward、optimizer
-调用、vLLM rollout 与权重同步，并输出 `training/global_step:1`。
+该配方已在 8×A100 上完成两次 Qwen3.5 真实 one-step RL 验证：一次使用
+原始环境，一次从空 Conda prefix 重建。随后又在同一个重建 prefix 上完成
+Qwen3-VL one-step。三次均走通 FSDP2 forward/backward、optimizer 调用、
+vLLM rollout 与权重同步，并输出 `training/global_step:1`。
 
 固定的软件栈如下：
 
@@ -25,6 +26,18 @@ Conda 环境，不依赖 Docker 或 Slurm，也不安装、启动或修改 Habit
 
 `requirements-portable.txt` 固定其余 Python 依赖。构建脚本还包含已验证的
 Transformers 5.3 Qwen3.5 3-D M-RoPE/FlashAttention 修复。
+
+## Qwen3-VL 与 Qwen3.5 的区别
+
+本配方是一个同时兼容 Qwen3-VL 与 Qwen3.5 的运行栈超集，但新增构建工作
+主要来自 Qwen3.5：其 hybrid backbone 含 GDN linear-attention 层，需要
+causal-conv1d/FLA；Transformers 5.3 还必须修复 3-D M-RoPE 被误判为 packed
+sequence 的 FlashAttention 越界问题。Qwen3.5 的已验证 RL 路径另外显式使用
+FSDP2、关闭 actor/ref torch.compile，并关闭 remove padding。
+
+这些都是运行栈适配，不改变项目自己的 RL 算法配置。完整差异表和
+必要 Hydra 覆盖见
+[`QWEN3_VS_QWEN35.md`](QWEN3_VS_QWEN35.md)。
 
 ## 1. 裸机要求
 
@@ -193,6 +206,7 @@ test ! -s "$MANIFEST_DIR/pip-check-unexpected.txt"
 ## 文件说明
 
 ```text
+QWEN3_VS_QWEN35.md                  # 两个 backbone 的运行配置差异
 scripts/
 ├── baremetal_build.sh              # 裸机唯一入口
 ├── baremetal.env.example           # 路径配置模板
@@ -206,4 +220,5 @@ scripts/
 ```
 
 本次交付不包含 Habitat、RL smoke、Slurm、模型权重、数据集、Conda prefix
-或预编译 wheel。Qwen3-VL 的完整实验将在后续单独补充。
+或预编译 wheel。同一 Conda prefix 已分别完成 Qwen3.5 和 Qwen3-VL
+one-step RL 路径验证；科学实验参数仍由同事的 workflow 显式固定。
