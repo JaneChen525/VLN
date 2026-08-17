@@ -1,0 +1,18 @@
+timestamp=2026-08-16T21:43:04-07:00
+job_id=32281360
+run_id=32281360-original-qwen35
+model=/lustre/fsw/portfolios/general/users/jiaychen/checkpoints/Qwen3.5-4B-base
+env=/lustre/fsw/portfolios/general/users/jiaychen/conda-envs/qwen35-verl-vllm018
+verl_commit=60c9749c82cedacf968ba28acdef2f4ba023e5e7
+model_family=qwen35
+worldmodel_commit=477c0b64b47d90174126d0d3104dac9ffe519ff4
+artifact_manifest_sha256=13d4a46109c9d0299e42ba5e5b47b30b9b63b54f00c113cc6b55a539abdf25c1
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+NVIDIA A100-SXM4-80GB, 535.129.03, 8.0
+status=RL_STEP_1_SUCCESS

@@ -1,0 +1,8 @@
+# Informational bootstrap only. The authoritative Conda lock is
+# conda-explicit.txt; pip packages are in requirements-lock.txt.
+name: qwen35-verl-vllm018
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.13
+  - pip

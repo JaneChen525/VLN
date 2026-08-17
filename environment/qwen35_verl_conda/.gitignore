@@ -1,0 +1,24 @@
+# Never publish local environments, credentials, models, or datasets.
+.env
+.env.*
+*.pem
+*.key
+id_*
+__pycache__/
+*.py[cod]
+
+conda-envs/
+miniconda*/
+models/
+checkpoints/
+data/
+datasets/
+
+# Generated heavyweight artifacts belong in controlled storage/releases.
+*.whl
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+logs/
+results/

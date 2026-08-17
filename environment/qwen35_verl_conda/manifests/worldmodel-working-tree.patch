@@ -1,0 +1,14 @@
+diff --git a/config/vln_r2r.yaml b/config/vln_r2r.yaml
+index 13ceb56..ae2eeba 100755
+--- a/config/vln_r2r.yaml
++++ b/config/vln_r2r.yaml
+@@ -58,5 +58,5 @@ habitat:
+   dataset:
+     type: R2RVLN-v1
+     split: val_unseen
+-    scenes_dir: /var/data0/sandbox/janec/WorldModel/data/scene_datasets
+-    data_path: /var/data0/sandbox/janec/WorldModel/data/vln_eval_datasets/r2r/{split}/{split}.json.gz
+\ No newline at end of file
++    scenes_dir: /lustre/fsw/portfolios/general/users/jiaychen/data/scene_datasets
++    data_path: /lustre/fsw/portfolios/general/users/jiaychen/data/vln_eval_datasets/r2r/{split}/{split}.json.gz
+\ No newline at end of file

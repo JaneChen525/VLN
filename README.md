@@ -17,6 +17,12 @@ Vision-and-Language Navigation：在 Habitat 仿真环境中，给定自然语�
 
 ## 环境安装
 
+> **Qwen3.5 原生 Conda 方案（无需 Verl Docker）：** 已完成 A100 上的
+> 原环境与全新 prefix 两次 one-step RL smoke。H200 + Ubuntu 24 + Driver
+> 570 的宿主配置、完整构建脚本、锁文件和验收证据见
+> [`environment/qwen35_verl_conda/`](environment/qwen35_verl_conda/README.md)。
+> Qwen3-VL 的完整 RL smoke 将在后续补充，不阻塞当前 Qwen3.5 交付。
+
 ### 硬件要求
 
 | 组件 | 最低配置 | 推荐配置 |
