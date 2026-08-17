@@ -1,31 +1,48 @@
 #!/bin/bash
 set -euo pipefail
 
-WORK=${WORK:-/lustre/fsw/portfolios/general/users/jiaychen}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+WORK=${WORK:-$HOME/qwen35-verl-work}
 CONDA_ROOT=${CONDA_ROOT:-$WORK/miniconda3}
 ENV_PREFIX=${ENV_PREFIX:-$WORK/conda-envs/qwen35-verl-vllm018}
-WORLDMODEL=${WORLDMODEL:-$WORK/WorldModel}
-SCRIPTS_DIR=${QWEN35_SCRIPTS_DIR:-$WORLDMODEL/scripts/qwen35_conda}
+WORLDMODEL=${WORLDMODEL:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}
+SCRIPTS_DIR=${QWEN35_SCRIPTS_DIR:-$SCRIPT_DIR}
 VERL_SRC=${VERL_SRC:-$WORLDMODEL/vln/reinforcement_learning}
 MODEL_DIR=${MODEL_DIR:-$WORK/checkpoints/Qwen3.5-4B-base}
-QWEN3VL_MODEL_DIR=${QWEN3VL_MODEL_DIR:-$WORK/checkpoints/Qwen3VL_4B_Final_swift}
 MANIFEST_DIR=${MANIFEST_DIR:-$WORLDMODEL/artifacts/qwen35-conda-env}
+LOCK_FILE=${LOCK_FILE:-$SCRIPTS_DIR/requirements-portable.txt}
+PINNED_MODEL_REVISION_FILE=${PINNED_MODEL_REVISION_FILE:-$SCRIPTS_DIR/qwen35-model-revision.txt}
+PINNED_MODEL_HASH_FILE=${PINNED_MODEL_HASH_FILE:-$SCRIPTS_DIR/qwen35-model-files.sha256}
 
 export CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS:-$WORK/.conda/pkgs}
 export PIP_CACHE_DIR=${PIP_CACHE_DIR:-$WORK/.cache/pip}
 export HF_HOME=${HF_HOME:-$WORK/.cache/huggingface-qwen35}
+export TMPDIR=${TMPDIR:-$WORK/tmp/qwen35-build}
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-$WORK/.cache/triton}
+export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$WORK/.cache/torchinductor}
 export TOKENIZERS_PARALLELISM=false
-mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$HF_HOME" "$MANIFEST_DIR" "$(dirname "$ENV_PREFIX")"
-rm -f "$MANIFEST_DIR/BUILD_SUCCESS"
+mkdir -p "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$HF_HOME" "$TMPDIR" \
+  "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$MANIFEST_DIR" \
+  "$(dirname "$ENV_PREFIX")"
+rm -f "$MANIFEST_DIR/BUILD_SUCCESS" \
+  "$MANIFEST_DIR/pip-check-unexpected.txt"
 
 if [[ ! -x "$CONDA_ROOT/bin/conda" ]]; then
   echo "Missing Conda: $CONDA_ROOT/bin/conda" >&2
   exit 1
 fi
+for required in "$LOCK_FILE" "$PINNED_MODEL_REVISION_FILE" \
+  "$PINNED_MODEL_HASH_FILE"; do
+  test -s "$required" || {
+    echo "Missing pinned input: $required" >&2
+    exit 1
+  }
+done
 
 if [[ ! -x "$ENV_PREFIX/bin/python" ]]; then
-  "$CONDA_ROOT/bin/conda" create -y -p "$ENV_PREFIX" -c conda-forge \
-    python=3.12 pip setuptools wheel packaging ninja cmake git git-lfs
+  "$CONDA_ROOT/bin/conda" create -y -p "$ENV_PREFIX" \
+    --override-channels -c conda-forge \
+    python=3.12.13 pip setuptools wheel packaging ninja cmake git git-lfs
 fi
 
 PY="$ENV_PREFIX/bin/python"
@@ -41,7 +58,7 @@ repack_portable_wheel() {
   test -n "$unpacked"
   while IFS= read -r -d '' so_file; do
     rpath=$("$ENV_PREFIX/bin/patchelf" --print-rpath "$so_file")
-    if [[ "$rpath" == *"$ENV_PREFIX"* || "$rpath" == *'/lustre/'* ]]; then
+    if [[ "$rpath" == *"$ENV_PREFIX"* ]]; then
       "$ENV_PREFIX/bin/patchelf" --remove-rpath "$so_file"
     fi
   done < <(find "$unpacked" -type f -name '*.so' -print0)
@@ -53,37 +70,27 @@ repack_portable_wheel() {
 }
 
 "${PIP[@]}" install --upgrade \
-  pip 'setuptools>=77.0.3,<81.0.0' wheel 'packaging>=25.0,<26.0' ninja
+  pip==26.2.1 setuptools==80.10.2 wheel==0.48.0 \
+  packaging==25.0 ninja==1.13.0
 
 # Match verl's Qwen3.5 vLLM image. CUDA is carried by PyTorch/vLLM wheels;
 # the host only supplies the NVIDIA driver.
 "${PIP[@]}" install \
   torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 \
   --index-url https://download.pytorch.org/whl/cu129
-"${PIP[@]}" install vllm==0.18.0
-"${PIP[@]}" install transformers==5.3.0
-"$PY" "$SCRIPTS_DIR/patch_transformers_qwen35_fa.py"
+"${PIP[@]}" install --no-deps vllm==0.18.0 transformers==5.3.0
 
-# verl runtime dependencies used by the FSDP2 + vLLM VLN path.
-"${PIP[@]}" install \
-  'numpy==1.26.4' \
-  accelerate codetiming datasets dill hydra-core pandas peft 'pyarrow>=19.0.0' \
-  pybind11 'ray[default]>=2.41.0' torchdata \
-  'tensordict>=0.8.0,<=0.10.0,!=0.9.0' \
-  wandb tensorboard cachetools pytest-asyncio \
-  mathruler pylatexenc qwen_vl_utils nvtx matplotlib liger_kernel nvidia-mathdx \
-  'pyelftools==0.32' \
-  'einops==0.8.2'
+# Install the exact non-core dependency closure from the validated environment.
+"${PIP[@]}" install -r "$LOCK_FILE"
+"$PY" "$SCRIPTS_DIR/patch_transformers_qwen35_fa.py"
 # vLLM's unconstrained resolver currently selects OpenCV 5, whose metadata
 # requires NumPy 2. Verl intentionally uses NumPy 1.x, so keep the last OpenCV
 # release line compatible with NumPy 1.26.
 "${PIP[@]}" install --force-reinstall --no-deps opencv-python-headless==4.11.0.86
-"${PIP[@]}" install --no-deps trl==0.27.0
 
-# Qwen3.5 has GDN linear-attention layers. Build causal-conv1d on the oldest
-# target host (env4, glibc 2.31). Upstream's CUDA 12 build matrix includes both
-# A100 (sm80) and H200 (sm90), so the wheel is portable across both GPUs.
-# The resulting wheel can be handed to the H200 user without a host-GLIBC trap.
+# Qwen3.5 has GDN linear-attention layers. Build causal-conv1d locally so its
+# host ABI matches this machine. Upstream's CUDA 12 build matrix includes both
+# A100 (sm80) and H200 (sm90), and the checks below require both device images.
 "$CONDA_ROOT/bin/conda" install -y -p "$ENV_PREFIX" \
   --override-channels -c nvidia/label/cuda-12.9.1 -c conda-forge \
   cuda-nvcc=12.9.86 cuda-cudart-dev=12.9.79 cuda-cuobjdump=12.9.82
@@ -121,7 +128,7 @@ grep -q 'sm_80' "$MANIFEST_DIR/causal-conv1d-cubin-list.txt"
 grep -q 'sm_90' "$MANIFEST_DIR/causal-conv1d-cubin-list.txt"
 
 # Match Dockerfile.stable.vllm: full-attention layers default to FA2 even when
-# sequence unpadding is disabled. Build once on glibc 2.31 and bundle the wheel.
+# sequence unpadding is disabled. Build it locally for this host ABI.
 "${PIP[@]}" uninstall -y flash-attn || true
 FLASH_WHEEL=$(find "$WHEEL_DIR" -maxdepth 1 -type f -name 'flash_attn-2.8.3*.whl' -print -quit)
 if [[ -z "$FLASH_WHEEL" ]]; then
@@ -159,43 +166,44 @@ PY
 
 "$PY" "$SCRIPTS_DIR/check_stack.py" --run-kernel
 
-# Download the official base checkpoint once. The fine-tuned checkpoint is not
-# needed for an environment smoke test.
-MODEL_REVISION_FILE="$MANIFEST_DIR/qwen35-model-revision.txt"
-if [[ ! -s "$MODEL_DIR/config.json" || ! -s "$MODEL_REVISION_FILE" ]]; then
+# Download the exact public Qwen3.5 base snapshot used for validation.
+PINNED_MODEL_REVISION=$(tr -d '[:space:]' < "$PINNED_MODEL_REVISION_FILE")
+test -n "$PINNED_MODEL_REVISION"
+if [[ ! -s "$MODEL_DIR/config.json" ]]; then
   "$PY" - <<PY
-from pathlib import Path
-from huggingface_hub import HfApi, snapshot_download
-revision = HfApi().model_info('Qwen/Qwen3.5-4B', revision='main').sha
+from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id='Qwen/Qwen3.5-4B',
-    revision=revision,
+    revision='$PINNED_MODEL_REVISION',
     local_dir='$MODEL_DIR',
     max_workers=2,
 )
-Path('$MODEL_REVISION_FILE').write_text(revision + '\n', encoding='utf-8')
 PY
 fi
+printf '%s\n' "$PINNED_MODEL_REVISION" > "$MANIFEST_DIR/qwen35-model-revision.txt"
+(cd "$MODEL_DIR" && sha256sum --check "$PINNED_MODEL_HASH_FILE")
 
 "$PY" "$SCRIPTS_DIR/check_stack.py" \
   --model "$MODEL_DIR" --expect-model-type qwen3_5 --run-kernel
 
-if [[ -s "$QWEN3VL_MODEL_DIR/config.json" ]]; then
-  "$PY" "$SCRIPTS_DIR/check_stack.py" \
-    --model "$QWEN3VL_MODEL_DIR" --expect-model-type qwen3_vl
-  find "$QWEN3VL_MODEL_DIR" -maxdepth 1 -type f \
-    \( -name config.json -o -name '*.index.json' \) -print0 | sort -z | \
-    xargs -0 sha256sum > "$MANIFEST_DIR/qwen3vl-metadata.sha256"
-else
-  echo "Missing Qwen3-VL compatibility checkpoint: $QWEN3VL_MODEL_DIR" >&2
-  exit 1
+"$PY" -m pip list --format=freeze > "$MANIFEST_DIR/pip-list.txt"
+"$PY" -m pip freeze --all > "$MANIFEST_DIR/requirements-lock.txt"
+"$CONDA_ROOT/bin/conda" list -p "$ENV_PREFIX" --explicit \
+  > "$MANIFEST_DIR/conda-explicit.txt"
+set +e
+"$PY" -m pip check > "$MANIFEST_DIR/pip-check.txt" 2>&1
+PIP_CHECK_RC=$?
+set -e
+if (( PIP_CHECK_RC != 0 )); then
+  grep -vE '^vllm 0\.18\.0 has requirement transformers<5,>=4\.56\.0, but you have transformers 5\.3\.0\.$' \
+    "$MANIFEST_DIR/pip-check.txt" | \
+  grep -vE '^vllm 0\.18\.0 has requirement opencv-python-headless>=4\.13\.0, but you have opencv-python-headless 4\.11\.0\.86\.$' \
+    > "$MANIFEST_DIR/pip-check-unexpected.txt" || true
+  if [[ -s "$MANIFEST_DIR/pip-check-unexpected.txt" ]]; then
+    cat "$MANIFEST_DIR/pip-check-unexpected.txt" >&2
+    exit 1
+  fi
 fi
-
-WORK="$WORK" WORLDMODEL="$WORLDMODEL" QWEN35_SCRIPTS_DIR="$SCRIPTS_DIR" \
-  MANIFEST_DIR="$MANIFEST_DIR" ENV_PREFIX="$ENV_PREFIX" \
-  CONDA_EXE="$CONDA_ROOT/bin/conda" VERL_SRC="$VERL_SRC" \
-  QWEN35_MODEL_DIR="$MODEL_DIR" QWEN3VL_MODEL_DIR="$QWEN3VL_MODEL_DIR" \
-  bash "$SCRIPTS_DIR/export_env.sh"
 {
   echo "timestamp=$(date -Is)"
   echo "env=$ENV_PREFIX"

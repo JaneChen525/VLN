@@ -5,7 +5,6 @@ set -uo pipefail
 EXPECTED_GPUS=${EXPECTED_GPUS:-8}
 REQUIRE_H200=${REQUIRE_H200:-1}
 REQUIRE_FABRIC_MANAGER=${REQUIRE_FABRIC_MANAGER:-1}
-REQUIRE_HABITAT_EGL=${REQUIRE_HABITAT_EGL:-1}
 MIN_FREE_GB=${MIN_FREE_GB:-100}
 TARGET_DIR=${TARGET_DIR:-$PWD}
 FAILURES=0
@@ -32,7 +31,7 @@ GLIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
 if [[ -n ${GLIBC:-} ]] && dpkg --compare-versions "$GLIBC" ge 2.31; then
   pass "glibc=$GLIBC (>=2.31)"
 else
-  fail "glibc=${GLIBC:-unknown}; bundled extension needs >=2.31"
+  fail "glibc=${GLIBC:-unknown}; this recipe requires >=2.31"
 fi
 
 echo '=== NVIDIA driver / GPUs ==='
@@ -72,7 +71,7 @@ else
   fi
   MIG_ENABLED=$(awk 'NF && tolower($0) !~ /^disabled$/ {n++} END {print n+0}' <<< "$GPU_MIG")
   if (( MIG_ENABLED > 0 )); then
-    fail 'MIG must be disabled for the 8-GPU TP/FSDP smoke'
+    fail 'MIG must be disabled for 8-GPU TP/FSDP training'
   else
     pass 'MIG disabled'
   fi
@@ -135,24 +134,18 @@ fi
 
 echo '=== Host runtime libraries ==='
 LDCONFIG_OUTPUT=$(ldconfig -p 2>/dev/null || true)
-for lib in libnuma.so.1 libibverbs.so.1 librdmacm.so.1 libGL.so.1 libglib-2.0.so.0; do
+for lib in libnuma.so.1 libibverbs.so.1 librdmacm.so.1; do
   if grep -Fq "$lib" <<< "$LDCONFIG_OUTPUT"; then
     pass "$lib"
   else
     fail "$lib is missing"
   fi
 done
-if (( REQUIRE_HABITAT_EGL )); then
-  for lib in libEGL.so.1 libOpenGL.so.0 libGLdispatch.so.0 libEGL_nvidia.so.0; do
-    if grep -Fq "$lib" <<< "$LDCONFIG_OUTPUT"; then
-      pass "$lib"
-    else
-      fail "$lib is missing; the Habitat GPU-EGL process needs it"
-    fi
-  done
-fi
-for cmd in git git-lfs curl gcc g++ cmake ninja numactl; do
-  command -v "$cmd" >/dev/null && pass "$cmd available" || warn "$cmd is missing"
+for cmd in git git-lfs curl gcc g++ numactl; do
+  command -v "$cmd" >/dev/null && pass "$cmd available" || fail "$cmd is required"
+done
+for cmd in cmake ninja; do
+  command -v "$cmd" >/dev/null && pass "$cmd available" || warn "$cmd will be installed inside Conda"
 done
 
 echo '=== Resource limits / storage ==='

@@ -17,11 +17,10 @@ Vision-and-Language Navigation：在 Habitat 仿真环境中，给定自然语�
 
 ## 环境安装
 
-> **Qwen3.5 原生 Conda 方案（无需 Verl Docker）：** 已完成 A100 上的
-> 原环境与全新 prefix 两次 one-step RL smoke。H200 + Ubuntu 24 + Driver
-> 570 的宿主配置、完整构建脚本、锁文件和验收证据见
+> **Qwen3.5 裸机 Conda 方案（无需 Verl Docker/Slurm）：** H200 + Ubuntu
+> 24 + Driver 570 的宿主预检、完整构建脚本和精确依赖锁见
 > [`environment/qwen35_verl_conda/`](environment/qwen35_verl_conda/README.md)。
-> Qwen3-VL 的完整 RL smoke 将在后续补充，不阻塞当前 Qwen3.5 交付。
+> 本目录只配置训练环境，不包含 Habitat 或 RL smoke workflow。
 
 ### 硬件要求
 
@@ -36,11 +35,11 @@ RL 训练需要 8 GPU：FSDP(8) + vLLM TP(8) colocated。
 ### Step 1: Clone（含 verl submodule）
 
 ```bash
-git clone --recurse-submodules https://github.com/JaneChen525/VLN.git
+git clone --branch codex/qwen35-conda-handoff --single-branch \
+  https://github.com/JaneChen525/VLN.git
 cd VLN
-
-# 若已 clone 但缺 submodule:
-git submodule update --init --recursive
+git -c submodule.vln/reinforcement_learning.update=checkout \
+  submodule update --init --recursive
 ```
 
 verl fork 在 `vln/reinforcement_learning/`（branch `vln-rl`），包含 VLN NaVIDA GRPO recipe。

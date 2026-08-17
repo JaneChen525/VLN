@@ -1,4 +1,0 @@
-timestamp=2026-08-16T19:39:59-07:00
-env=/lustre/fsw/portfolios/general/users/jiaychen/conda-envs/qwen35-verl-vllm018
-model=/lustre/fsw/portfolios/general/users/jiaychen/checkpoints/Qwen3.5-4B-base
-status=BUILD_SUCCESS
